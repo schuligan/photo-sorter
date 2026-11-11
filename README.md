@@ -98,7 +98,7 @@ Your browser opens the tool. Keep the Terminal or PowerShell window open while y
 ### Choose what to sort
 Pick one of the two buttons:
 
-- **Pick a folder to tidy:** choose one messy folder. The tool uses the files directly inside it, up to 1,500. Files inside its subfolders are left alone.
+- **Pick a folder to tidy:** choose one messy folder. The tool uses every file directly inside it, however many there are. Files inside its subfolders are left alone.
 - **Find photos (or files) all over my computer:** it collects the loose files at the top of your **Desktop, Downloads, Documents, Pictures, Movies (Videos on Windows) and Music** folders. It never touches your Photos library, apps or system files. On Windows it skips OneDrive files that are only in the cloud.
 
 **Where sorted files go:** under **Sorted photos go to**, click **Choose…** to pick a destination folder. If you don't, they go into new folders inside the folder you picked.
@@ -156,7 +156,7 @@ On a Mac, if it asks whether Terminal may access a folder or drive, click **Allo
 
 - **Photo Sorter folders:** Selfies and people, Food, Travel and places, Nature, Documents and screenshots, Pets, Other, and Duplicates. It handles JPG, PNG, HEIC, WebP, GIF, TIFF, MOV, MP4 and M4V.
 - **File Sorter folders:** Documents, Spreadsheets, Slides, Images, Videos, Audio, Zip files, Installers, Code, Screenshots, and Other.
-- Sorting 1,000 photos uses about 40 requests from your Claude plan.
+- Sorting 1,000 photos uses about 40 requests from your Claude plan, so a very big folder takes longer and uses more of your plan.
 - To remove the tools, move their folder to the Trash.
 
 ---

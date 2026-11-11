@@ -71,13 +71,13 @@ class Scanning(Base):
         items = engine.scan(self.dir, TOOL).items
         self.assertEqual(engine.find_duplicates(self.dir, items), {"b.jpg": "a.jpg", "d.png": "a.jpg"})
 
-    def test_25_cap_keeps_first_1500_in_name_order(self):
+    def test_25_no_cap_every_file_is_kept_in_name_order(self):
         for i in range(1501):
             self.put(f"{i:04}.jpg")
         result = engine.scan(self.dir, TOOL)
-        self.assertEqual(len(result.items), 1500)
-        self.assertEqual(result.items[-1].name, "1499.jpg")
-        self.assertEqual(result.left_out, 1)
+        self.assertEqual(len(result.items), 1501)
+        self.assertEqual(result.items[-1].name, "1500.jpg")
+        self.assertEqual(result.left_out, 0)
 
     def test_28_hostile_names_are_plain_files(self):
         names = ["-rf.jpg", "$(touch p).jpg", "a;b.jpg"]

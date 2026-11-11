@@ -33,7 +33,6 @@ WINDOWS = sys.platform == "win32"
 if not WINDOWS:
     import fcntl
 
-LIMIT = 1500
 DUPLICATES = "Duplicates"
 RUNS = ".organizer-runs"
 RENAME_FLAGS = 0x00000004 | 0x00000010  # RENAME_EXCL | RENAME_NOFOLLOW_ANY, from <sys/stdio.h>
@@ -371,10 +370,10 @@ def scan(folder, tool):
 
 
 def scan_many(folders, tool):
-    """Top level of each folder only. Capped at LIMIT, in name order."""
+    """Top level of each folder only, in name order. No cap: every file found is sorted."""
     found = [item for n, folder in enumerate(folders) for item in _scan_one(folder, tool, n)]
     found.sort(key=lambda i: (i.name, i.src))
-    return Scan(found[:LIMIT], max(0, len(found) - LIMIT))
+    return Scan(found, 0)
 
 
 def _duplicates(entries):

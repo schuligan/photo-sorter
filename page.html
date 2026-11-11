@@ -363,7 +363,7 @@ addEventListener("resize", () => folders.forEach(stack));
 const TILE = 112, PAD = 14;
 function bake(bmp, video) {
   // Big folders bake smaller tiles: 1,000 full-size tiles would hold about 80 MB.
-  const q = view.thumbs.length > 300 ? 0.5 : 1;
+  const n = view.thumbs.length, q = n > 3000 ? 0.3 : n > 300 ? 0.5 : 1;  // keeps 10,000 tiles to roughly 70 MB
   const c = document.createElement("canvas"); c.width = c.height = Math.ceil((TILE + PAD * 2) * q);
   const g = c.getContext("2d"); g.scale(q, q);
   g.shadowColor = "rgba(30,60,110,.32)"; g.shadowBlur = 10; g.shadowOffsetY = 4;
