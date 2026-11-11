@@ -39,7 +39,7 @@ brew install python ffmpeg
 3. Once you're signed in, type `/exit` and press `Return`.
 
 ### Step 4: Download the tools
-1. On this page, click the green **Code** button, then **Download ZIP**.
+1. Go to **[github.com/schuligan/photo-sorter](https://github.com/schuligan/photo-sorter)**, click the green **Code** button, then **Download ZIP**.
 2. In **Downloads**, double-click the ZIP to unzip it, then move the folder somewhere easy, like **Documents**.
 
 ---
@@ -63,7 +63,7 @@ brew install python ffmpeg
 3. Once you're signed in, type `/exit` and press `Enter`.
 
 ### Step 3: Download the tools
-1. On this page, click the green **Code** button, then **Download ZIP**.
+1. Go to **[github.com/schuligan/photo-sorter](https://github.com/schuligan/photo-sorter)**, click the green **Code** button, then **Download ZIP**.
 2. In **Downloads**, right-click the ZIP, choose **Extract All…**, then move the folder somewhere easy, like **Documents**.
 
 ---
