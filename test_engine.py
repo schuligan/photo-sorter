@@ -1,4 +1,4 @@
-"""Pass/fail tests for Photo Sorter. Run: python3 -m unittest test_engine"""
+"""Pass/fail tests for Photo Sorter and File Sorter. Run: python3 -m unittest test_engine"""
 import errno
 import hashlib
 import http.client
@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -757,6 +758,9 @@ time.sleep(5)
         with mock.patch("engine.CLAUDE_TIMEOUT", 0.3), self.assertRaises(engine.ClaudeSlow):
             self.categories(self.thumbs(1))
 
+    def test_recording_extras_are_off_unless_asked_for(self):
+        self.assertIs(engine.App(TOOL).view()["film"], False)
+
     def test_two_running_copies_get_their_own_thumbnail_folders(self):
         self.assertIn(str(os.getpid()), engine.THUMBS.name)
         self.assertIn(str(os.getpid()), engine.EMPTY.name)
@@ -1279,6 +1283,433 @@ class SecondTool(ServerBase):
         self.assertTrue((self.photos / "Red" / "a.png").exists())
         self.call("POST", "/api/undo", {})
         self.assertTrue((self.photos / "a.png").exists())
+
+
+# File Sorter. Numbers match docs/lane/file-sorter/spec.md.
+import file_sorter  # noqa: E402
+
+FILES = file_sorter.TOOL
+REAL_MAKE_THUMBS = engine.make_thumbs  # kept before any test replaces it
+
+
+class FilesBase(Base):
+    def setUp(self):
+        super().setUp()
+        self.home = self.dir / "home"
+        for part in engine.SWEEP:
+            (self.home / part).mkdir(parents=True)
+        self.dest = self.dir / "Tidy"
+        self.dest.mkdir()
+        mock.patch("engine._ask", side_effect=AssertionError("Claude was called")).start()
+        mock.patch("engine.make_thumbs", side_effect=AssertionError("Photo Sorter thumbnails were made")).start()
+        mock.patch("engine.PREVIEWS", self.dir / "previews").start()
+        self.previews = mock.patch("engine.make_previews", return_value={}).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def at(self, rel, data=None):
+        path = self.home / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(rel.encode() if data is None else data)
+        return path
+
+    def app(self, dest=True):
+        app = engine.App(FILES, home=self.home)
+        if dest:
+            app.set_dest(str(self.dest))
+        return app
+
+    def go(self, app, start):
+        job = start()
+        if job:
+            job()
+        return app
+
+    def swept(self, app=None):
+        app = app or self.app()
+        self.go(app, app.sweep)
+        app.sort()
+        return app
+
+    def everything(self):
+        out = {}
+        for p in self.dir.rglob("*"):
+            if p.is_file() and engine.RUNS not in p.parts:
+                out.setdefault(hashlib.sha256(p.read_bytes()).hexdigest(), []).append(str(p.relative_to(self.dir)))
+        return out
+
+
+class Files(FilesBase):
+    def test_F1_every_type_listed_except_hidden_links_folders_and_half_downloads(self):
+        for n in ("a.pdf", "b.XLSX", "c.zip", "noext", "d.weird", ".hidden.pdf", "e.crdownload", "f.part"):
+            self.at(f"Downloads/{n}")
+        (self.home / "Downloads" / "sub").mkdir()
+        os.symlink(self.home / "Downloads" / "a.pdf", self.home / "Downloads" / "link.pdf")
+        names = [i.name for i in engine.scan(self.home / "Downloads", FILES).items]
+        self.assertEqual(names, sorted(["a.pdf", "b.XLSX", "c.zip", "noext", "d.weird"]))
+
+    def test_F1_icloud_files_not_on_this_mac_are_skipped(self):
+        self.at("Desktop/here.pdf")
+        away = self.at("Desktop/away.pdf")
+        os.chflags(away, stat.UF_NODUMP)  # a flag a test can set, standing in for "dataless"
+        with mock.patch("engine.SF_DATALESS", stat.UF_NODUMP):
+            self.assertEqual([i.name for i in engine.scan(self.home / "Desktop", FILES).items], ["here.pdf"])
+
+    def test_F2_each_type_lands_in_its_category_and_copies_go_to_duplicates_across_folders(self):
+        self.at("Desktop/report.pdf", b"same")
+        self.at("Downloads/report copy.pdf", b"same")
+        self.at("Downloads/Screenshot 2026-01-02 at 10.00.00.png", b"s")
+        self.at("Documents/budget.xlsx", b"x")
+        self.at("Music/song.mp3", b"m")
+        self.at("Downloads/thing.qqq", b"q")
+        app = self.swept()
+        got = {app.items[int(k)].name: c for k, c in app.results.items()}
+        self.assertEqual(got, {"report copy.pdf": "Documents", "report.pdf": "Duplicates",
+                               "Screenshot 2026-01-02 at 10.00.00.png": "Screenshots", "budget.xlsx": "Spreadsheets",
+                               "song.mp3": "Audio", "thing.qqq": "Other"})
+
+    def test_F3_no_claude_through_a_whole_run(self):
+        self.at("Desktop/a.png")
+        app = self.swept()
+        app.apply(str(self.dest))
+        self.assertEqual(app.phase, "applied")
+        self.assertEqual(engine.missing_setup(FILES) if sys.version_info >= (3, 11) else "", "")
+
+    def test_F4_sweep_reads_only_the_top_of_the_six_folders(self):
+        for rel in ("Desktop/a.pdf", "Downloads/b.zip", "Documents/c.docx", "Pictures/d.jpg", "Movies/e.mov", "Music/f.mp3",
+                    "Downloads/Old/deep.pdf", "Library/Preferences/x.pdf", "Applications/Fake.app/Contents/y.pdf",
+                    "Pictures/Photos Library.photoslibrary/z.jpg", "Desktop/.secret.txt", "loose-in-home.pdf",
+                    "Documents/project/.git/HEAD", "Documents/project/main.py"):
+            self.at(rel)
+        app = self.app()
+        self.go(app, app.sweep)
+        self.assertEqual(sorted(i.name for i in app.items), ["a.pdf", "b.zip", "c.docx", "d.jpg", "e.mov", "f.mp3"])
+        self.assertEqual([Path(s).name for s in app.sources], list(engine.SWEEP))
+
+    def test_F5_a_code_project_is_refused_in_folder_mode_and_skipped_by_the_sweep(self):
+        self.at("Documents/.git/HEAD")
+        self.at("Documents/notes.txt")
+        self.at("Desktop/a.pdf")
+        app = self.app()
+        with self.assertRaises(engine.Refused):
+            app.scan(str(self.home / "Documents"))
+        self.go(app, app.sweep)
+        self.assertEqual([i.name for i in app.items], ["a.pdf"])
+        self.assertIn("Documents", [n for n, _ in app.left_folders])
+
+    def test_F6_files_move_only_into_the_destination_and_nothing_is_lost(self):
+        self.at("Desktop/notes.txt", b"one")
+        self.at("Downloads/notes.txt", b"two")
+        (self.dest / "Documents").mkdir()
+        (self.dest / "Documents" / "notes.txt").write_bytes(b"already there")
+        before = self.everything()
+        app = self.swept()
+        app.apply(str(self.dest))
+        self.assertEqual(sorted(p.name for p in (self.dest / "Documents").iterdir()), ["notes (2).txt", "notes (3).txt", "notes.txt"])
+        self.assertEqual(list((self.home / "Desktop").iterdir()), [])
+        self.assertEqual(sorted(before), sorted(self.everything()))  # same contents, none lost
+
+    def test_F7_another_drive_never_moves(self):
+        other = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, other, True)
+        if os.lstat(other).st_dev == os.lstat(self.dir).st_dev:
+            self.skipTest("needs two drives")
+        # The Mac's own temporary folder is the second drive here; let the folder check accept it for this test.
+        mock.patch("engine._SYSTEM", tuple(p for p in engine._SYSTEM if p != "/private/var/folders")).start()
+        (other / "x.pdf").write_bytes(b"x")
+        app = engine.App(FILES, home=self.home)
+        app.set_dest(str(other))
+        with self.assertRaises(engine.Refused):
+            app.scan(str(self.home / "Desktop"))
+        self.at("Desktop/a.pdf")
+        with self.assertRaises(engine.Refused):
+            app.sweep()  # every folder is on the other drive
+        item = engine.scan(other, FILES).items[0]
+        item.category = "Documents"
+        with self.assertRaises(engine.Refused):
+            engine.apply(self.dest, [item], FILES, [other])
+        self.assertTrue((other / "x.pdf").exists())
+
+    def test_F8_apply_needs_the_confirmed_destination_and_sweep_needs_one(self):
+        self.at("Desktop/a.pdf")
+        with self.assertRaises(engine.Conflict):
+            self.app(dest=False).sweep()
+        app = self.swept()
+        for wrong in (None, "", str(self.dir), str(self.dest) + "/"):
+            with self.assertRaises(engine.Conflict):
+                app.apply(wrong)
+        self.assertTrue((self.home / "Desktop" / "a.pdf").exists())
+        app.apply(str(self.dest))
+        self.assertTrue((self.dest / "Documents" / "a.pdf").exists())
+
+    def test_F9_undo_puts_each_file_back_in_its_own_folder_after_a_restart(self):
+        self.at("Desktop/a.pdf", b"A")
+        self.at("Downloads/a.pdf", b"B")
+        self.at("Music/c.mp3", b"C")
+        before = self.everything()
+        self.swept().apply(str(self.dest))
+        later = self.app()  # a new app, as after a restart
+        self.assertEqual(later.pending, 3)
+        later.undo()
+        self.assertEqual(later.restored, 3)
+        self.assertEqual(before, self.everything())
+        self.assertFalse((self.dest / "Documents").exists())
+
+    def test_F9_folder_mode_with_the_same_folder_writes_photo_sorter_style_logs(self):
+        folder = self.home / "Desktop"
+        self.at("Desktop/a.pdf")
+        app = engine.App(FILES, home=self.home)
+        self.go(app, lambda: app.scan(str(folder)))
+        app.sort()
+        app.apply(str(folder))
+        self.assertTrue((folder / "Documents" / "a.pdf").exists())
+        log = next((folder / engine.RUNS).glob("*.jsonl"))
+        self.assertNotIn('"from"', log.read_text())
+        app.undo()
+        self.assertTrue((folder / "a.pdf").exists())
+
+    def forge(self, **change):
+        self.at("Desktop/a.pdf", b"A")
+        self.swept().apply(str(self.dest))
+        log = next((self.dest / engine.RUNS).glob("*.jsonl"))
+        row = json.loads(log.read_text().splitlines()[0])
+        row.update(change)
+        log.write_text(json.dumps(row) + "\n")
+        return log
+
+    def test_F10_forged_from_folders_move_nothing(self):
+        outside = self.dir / "outside"
+        outside.mkdir()
+        os.symlink(outside, self.dir / "sneaky")
+        other = Path(tempfile.mkdtemp()).resolve()  # the Mac's own disk: another drive from the test folder
+        self.addCleanup(shutil.rmtree, other, True)
+        mock.patch("engine._SYSTEM", tuple(p for p in engine._SYSTEM if p != "/private/var/folders")).start()
+        bad_ones = ["Desktop", str(self.dir / "sneaky"), "/System/Library", str(Path.home() / "Library"), 7,
+                    str(self.home / "Desktop") + "/../Desktop"]
+        if os.lstat(other).st_dev != os.lstat(self.dir).st_dev:
+            bad_ones.append(str(other))
+        for bad in bad_ones:
+            with self.subTest(bad=bad):
+                for p in (self.dest / engine.RUNS).glob("*") if (self.dest / engine.RUNS).exists() else ():
+                    p.unlink()
+                for p in self.dest.rglob("*.pdf"):
+                    p.unlink()
+                for p in (self.home / "Desktop").glob("*.pdf"):
+                    p.unlink()
+                self.forge(**{"from": bad})
+                before = self.everything()
+                self.assertEqual(engine.pending_undo(self.dest, FILES), 0)
+                with self.assertRaises(engine.Refused):
+                    engine.undo(self.dest, FILES)
+                self.assertEqual(before, self.everything())
+
+    def test_F10_run_history_others_can_write_is_not_trusted(self):
+        self.at("Desktop/a.pdf", b"A")
+        self.swept().apply(str(self.dest))
+        log = next((self.dest / engine.RUNS).glob("*.jsonl"))
+        os.chmod(log, 0o666)
+        self.assertEqual(engine.pending_undo(self.dest, FILES), 0)
+        os.chmod(log, 0o600)
+        os.chmod(self.dest / engine.RUNS, 0o777)
+        with self.assertRaises(engine.Refused):
+            engine.undo(self.dest, FILES)
+        os.chmod(self.dest / engine.RUNS, 0o755)
+        self.assertEqual(engine.undo(self.dest, FILES).restored, 1)
+
+    def test_F10_photo_sorter_history_with_a_forged_from_moves_nothing(self):
+        self.put("a.jpg", b"A")
+        items = engine.scan(self.dir, TOOL).items
+        items[0].category = "Food"
+        engine.apply(self.dir, items, TOOL)
+        log = next((self.dir / engine.RUNS).glob("*.jsonl"))
+        row = json.loads(log.read_text())
+        row["from"] = "/System/Library"
+        log.write_text(json.dumps(row) + "\n")
+        with self.assertRaises(engine.Refused):
+            engine.undo(self.dir, TOOL)
+        self.assertTrue((self.dir / "Food" / "a.jpg").exists())
+
+    def test_F10_a_from_folder_that_has_gone_keeps_the_run_and_leaves_its_files(self):
+        self.at("Desktop/a.pdf", b"A")
+        self.at("Music/b.mp3", b"B")
+        self.swept().apply(str(self.dest))
+        (self.home / "Music").rename(self.home / "Music old")
+        self.assertEqual(engine.pending_undo(self.dest, FILES), 2)  # the run is still the one on offer
+        result = engine.undo(self.dest, FILES)
+        self.assertEqual(result.restored, 1)
+        self.assertEqual([x.name for x in result.left], ["b.mp3"])
+        self.assertTrue((self.home / "Desktop" / "a.pdf").exists())
+        self.assertTrue((self.dest / "Audio" / "b.mp3").exists())
+
+    def test_F1_files_macos_marks_hidden_are_never_read(self):
+        self.at("Downloads/report.pdf")
+        icon = self.at("Downloads/Icon\r")
+        os.chflags(icon, stat.UF_HIDDEN)
+        self.assertEqual([i.name for i in engine.scan(self.home / "Downloads", FILES).items], ["report.pdf"])
+
+    def test_F4_a_top_folder_that_is_a_link_is_left_out(self):
+        (self.home / "Pictures").rmdir()
+        os.symlink(self.home / "Desktop", self.home / "Pictures")
+        self.at("Desktop/a.pdf")
+        app = self.app()
+        self.go(app, app.sweep)
+        self.assertNotIn("Pictures", [Path(s).name for s in app.sources])
+        self.assertIn("Pictures", [n for n, _ in app.left_folders])
+        self.assertEqual([i.name for i in app.items], ["a.pdf"])
+
+    def test_F4_a_folder_this_mac_wont_list_is_left_out_and_the_rest_still_sorts(self):
+        self.at("Desktop/a.pdf")
+        self.at("Documents/b.pdf")
+        os.chmod(self.home / "Documents", 0o311)  # can enter, can't list
+        self.addCleanup(os.chmod, self.home / "Documents", 0o755)
+        app = self.app()
+        self.go(app, app.sweep)
+        self.assertEqual([i.name for i in app.items], ["a.pdf"])
+        self.assertIn("Documents", [n for n, _ in app.left_folders])
+
+    def test_F10_a_pipe_posing_as_run_history_cannot_hang_undo(self):
+        runs = self.dest / engine.RUNS
+        runs.mkdir(mode=0o755)
+        os.mkfifo(runs / "20990101T000000000000-ffff.jsonl", 0o600)
+        done = []
+        t = threading.Thread(target=lambda: done.append(engine.pending_undo(self.dest, FILES)), daemon=True)
+        t.start(); t.join(5)
+        self.assertEqual(done, [0])
+
+    def test_a_destination_that_was_deleted_is_a_plain_refusal(self):
+        self.at("Desktop/a.pdf")
+        app = self.app()
+        self.dest.rmdir()
+        with self.assertRaises(engine.Refused):
+            app.scan(str(self.home / "Desktop"))
+
+
+class FilesPreviews(Base):
+    def test_F3_quick_look_previews_stay_in_the_private_folder_numbered_not_named(self):
+        mock.patch("engine.PREVIEWS", self.dir / "previews").start()
+        self.addCleanup(mock.patch.stopall)
+        src = self.dir / "src"
+        src.mkdir()
+        (src / "-rf $(touch p).txt").write_text("hello")
+        (src / "notes.txt").write_text("notes")
+        items = engine.scan(src, FILES).items
+        got = engine.make_previews([src], items, {})
+        self.assertEqual(sorted(got), [0, 1])
+        self.assertEqual(sorted(p.name for p in (self.dir / "previews").iterdir()), ["0.png", "1.png"])
+        self.assertFalse((src / "p").exists())
+        self.assertEqual(sorted(p.name for p in src.iterdir()), ["-rf $(touch p).txt", "notes.txt"])
+        engine.clear_previews()
+        self.assertEqual(list((self.dir / "previews").iterdir()), [])
+
+    def test_F3_file_sorter_never_clears_photo_sorter_thumbnails(self):
+        mock.patch("engine.PREVIEWS", self.dir / "previews").start()
+        mock.patch("engine.THUMBS", self.dir / "thumbs").start()
+        self.addCleanup(mock.patch.stopall)
+        engine._private_dir(engine.THUMBS)
+        (self.dir / "thumbs" / "0.jpg").write_bytes(b"photo sorter thumbnail")
+        engine._private_dir(engine.PREVIEWS)
+        (self.dir / "previews" / "0.png").write_bytes(b"file sorter preview")
+        (self.dir / "previews" / "tmpleft").mkdir()
+        (self.dir / "previews" / "tmpleft" / "x.png").write_bytes(b"left by a stopped run")
+        app = engine.App(FILES)
+        app.restart()
+        self.assertTrue((self.dir / "thumbs" / "0.jpg").exists())
+        self.assertEqual(list((self.dir / "previews").iterdir()), [])
+
+
+class PhotosSweep(FilesBase):
+    """The whole-computer button and a chosen destination, in Photo Sorter."""
+    def photo_app(self):
+        app = engine.App(TOOL, home=self.home)
+        app.set_dest(str(self.dest))
+        return app
+
+    def test_sweep_takes_only_loose_photos_and_videos_and_undo_puts_them_back(self):
+        mock.patch("engine.make_thumbs", lambda folders, items, tick=None: ({n: Path("x.jpg") for n in range(len(items))}, [])).start()
+        mock.patch("engine.sort_all", lambda thumbs, tool, model, on_batch=None: on_batch({i: "Food" for i in thumbs})).start()
+        for rel in ("Desktop/a.jpg", "Pictures/b.png", "Movies/c.mov", "Downloads/notes.txt", "Pictures/Old/d.jpg",
+                    "Pictures/Photos Library.photoslibrary/e.jpg", "Desktop/.f.jpg"):
+            self.at(rel)
+        before = self.everything()
+        app = self.photo_app()
+        self.go(app, app.sweep)
+        self.assertEqual(sorted(i.name for i in app.items), ["a.jpg", "b.png", "c.mov"])
+        self.go(app, app.sort)
+        with self.assertRaises(engine.Conflict):
+            app.apply(None)  # the confirm step names the destination
+        app.apply(str(self.dest))
+        self.assertEqual(sorted(p.name for p in (self.dest / "Food").iterdir()), ["a.jpg", "b.png", "c.mov"])
+        later = self.photo_app()
+        later.undo()
+        self.assertEqual(before, self.everything())
+
+    def test_thumbnails_come_from_each_photos_own_folder(self):
+        seen = []
+
+        def thumb(src, index, is_video):
+            seen.append(Path(src))
+            out = self.dir / f"t{index}.jpg"
+            out.write_bytes(b"\xff\xd8thumb")
+            return out
+        mock.patch("engine.make_thumb", thumb).start()
+        mock.patch("engine.make_thumbs", REAL_MAKE_THUMBS).start()
+        self.at("Desktop/a.jpg")
+        self.at("Pictures/b.png")
+        app = self.photo_app()
+        self.go(app, app.sweep)
+        self.assertEqual(sorted(seen), sorted([self.home / "Desktop" / "a.jpg", self.home / "Pictures" / "b.png"]))
+        self.assertEqual(app.skipped, [])
+
+    def test_one_folder_into_a_chosen_destination_needs_the_confirm(self):
+        mock.patch("engine.make_thumbs", lambda folders, items, tick=None: ({n: Path("x.jpg") for n in range(len(items))}, [])).start()
+        mock.patch("engine.sort_all", lambda thumbs, tool, model, on_batch=None: on_batch({i: "Food" for i in thumbs})).start()
+        self.at("Desktop/a.jpg")
+        app = self.photo_app()
+        self.go(app, lambda: app.scan(str(self.home / "Desktop")))
+        self.go(app, app.sort)
+        with self.assertRaises(engine.Conflict):
+            app.apply(None)
+        self.assertTrue((self.home / "Desktop" / "a.jpg").exists())
+        app.apply(str(self.dest))
+        self.assertTrue((self.dest / "Food" / "a.jpg").exists())
+
+    def test_folder_mode_without_a_destination_still_needs_no_confirm(self):
+        mock.patch("engine.make_thumbs", lambda folders, items, tick=None: ({n: Path("x.jpg") for n in range(len(items))}, [])).start()
+        mock.patch("engine.sort_all", lambda thumbs, tool, model, on_batch=None: on_batch({i: "Nature" for i in thumbs})).start()
+        self.at("Desktop/a.jpg")
+        app = engine.App(TOOL, home=self.home)
+        self.go(app, lambda: app.scan(str(self.home / "Desktop")))
+        self.go(app, app.sort)
+        app.apply(None)
+        self.assertTrue((self.home / "Desktop" / "Nature" / "a.jpg").exists())
+
+
+class FilesServer(ServerBase):
+    tool = FILES
+
+    def test_F8_whole_flow_through_the_page_routes(self):
+        mock.patch("engine.make_previews", return_value={}).start()
+        home = self.dir / "home"
+        (home / "Desktop").mkdir(parents=True)
+        (home / "Desktop" / "a.pdf").write_bytes(b"A")
+        self.app.home = home
+        dest = self.dir / "Tidy"
+        dest.mkdir()
+        self.assertEqual(self.call("POST", "/api/sweep", {})[0].status, 409)
+        self.assertEqual(self.call("POST", "/api/dest", {"path": str(dest)})[0].status, 200)
+        self.assertEqual(self.call("POST", "/api/sweep", {}, token=False)[0].status, 403)
+        self.assertEqual(self.call("POST", "/api/sweep", {})[0].status, 200)
+        s = self.wait_for("scanned")
+        self.assertEqual((s["mode"], s["names"], s["dest"]), ("sweep", ["a.pdf"], str(dest)))
+        self.call("POST", "/api/sort", {})
+        s = self.wait_for("review")
+        self.assertEqual(s["results"], {"0": "Documents"})
+        self.assertEqual(self.call("POST", "/api/apply", {})[0].status, 409)
+        self.assertEqual(self.call("POST", "/api/apply", {"path": str(dest)})[0].status, 200)
+        self.assertTrue((dest / "Documents" / "a.pdf").exists())
+        self.call("POST", "/api/undo", {})
+        self.assertTrue((home / "Desktop" / "a.pdf").exists())
+        r, body = self.call("GET", "/")
+        self.assertIn(b"Find files all over my computer", body)
 
 
 if __name__ == "__main__":

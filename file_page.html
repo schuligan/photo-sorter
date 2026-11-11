@@ -1,0 +1,1095 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File Sorter</title>
+<style>
+:root {
+  --ink: #1d2939; --muted: #74839a; --faint: #a9b6c6; --line: rgba(255,255,255,.85);
+  --glass: rgba(255,255,255,.58); --glass-hi: rgba(255,255,255,.78);
+  --rose: #1f6fd6; --plum: #21a3d6; --bad: #c0392b;
+  --shadow: 0 18px 40px -22px rgba(40,80,140,.45), 0 2px 6px -2px rgba(40,80,140,.12);
+  --serif: ui-serif, "New York", "Iowan Old Style", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  color: var(--ink); font: 15px/1.35 var(--sans); overflow: hidden; -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(1100px 700px at 8% -10%, #d3e9ff 0%, transparent 60%),
+    radial-gradient(900px 700px at 105% 10%, #dbe6ff 0%, transparent 55%),
+    radial-gradient(900px 600px at 50% 115%, #e4f2ff 0%, transparent 60%),
+    linear-gradient(160deg, #f4f9fe 0%, #eef5fd 55%, #f3f8fd 100%);
+}
+canvas#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: 5; }
+
+#app { position: relative; height: 100%; display: grid; gap: 14px; padding: 22px 28px 18px; pointer-events: none;
+  grid-template-rows: auto auto 1fr auto; grid-template-areas: "top" "stats" "floor" "bar"; }
+#app > * { pointer-events: auto; }
+#top { grid-area: top; position: relative; z-index: 6; display: flex; align-items: center; gap: 14px; min-width: 0; }
+#stats { grid-area: stats; }
+#floor { grid-area: floor; position: relative; min-height: 0; pointer-events: none; }
+#bar { grid-area: bar; position: relative; z-index: 6; }
+
+.avatar { width: 46px; height: 46px; border-radius: 50%; flex: none; display: grid; place-items: center; color: #fff; font: italic 600 22px var(--serif);
+  background: conic-gradient(from 200deg, #7cc0ff, #9fc3ff, #b9dcff, #7cc0ff); box-shadow: 0 6px 18px -6px rgba(31,111,214,.6), inset 0 0 0 3px rgba(255,255,255,.65); }
+.heading { min-width: 0; flex: 1; }
+.studio { font-size: 13px; color: var(--muted); font-weight: 600; }
+.studio b { color: var(--ink); }
+h1 { margin: 0; font-size: clamp(26px, 3.2vw, 44px); line-height: 1.05; font-weight: 750; letter-spacing: -.025em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+h1 em { font-family: var(--serif); font-style: italic; font-weight: 500; letter-spacing: -.01em; padding: 0 .06em;
+  background: linear-gradient(90deg, var(--rose), var(--plum)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.tools { display: flex; align-items: center; gap: 10px; flex: none; }
+.status { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; font-size: 13px; color: var(--muted);
+  background: var(--glass); border: 1px solid var(--line); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); white-space: nowrap; }
+.status i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.status.live i { background: var(--rose); animation: ping 1.4s infinite; }
+@keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(31,111,214,.6); } 70% { box-shadow: 0 0 0 9px rgba(31,111,214,0); } 100% { box-shadow: 0 0 0 0 rgba(31,111,214,0); } }
+.ghost { font: inherit; font-size: 13px; font-weight: 600; color: var(--muted); padding: 8px 13px; border-radius: 999px; cursor: pointer;
+  background: transparent; border: 1px solid rgba(110,128,150,.28); display: inline-flex; gap: 6px; align-items: center; }
+.ghost:hover { color: var(--ink); background: var(--glass); }
+
+#stats { display: grid; grid-template-columns: 1.25fr repeat(4, 1fr); border-radius: 26px; padding: 14px 8px; position: relative; z-index: 6;
+  background: var(--glass); border: 1px solid var(--line); box-shadow: var(--shadow); }
+.stat { padding: 2px 22px; border-left: 1px solid rgba(110,128,150,.16); min-width: 0; }
+.stat:first-child { border-left: 0; }
+.stat small { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.stat small i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .7; }
+.stat b { display: block; margin-top: 2px; font-size: clamp(26px, 2.8vw, 44px); font-weight: 750; letter-spacing: -.03em; font-variant-numeric: tabular-nums; line-height: 1.1; transition: transform .25s; }
+.stat b.bump { transform: translateY(-3px) scale(1.04); }
+.stat.total b { background: linear-gradient(90deg, var(--rose), #3fa9f0); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+#start { position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%); pointer-events: auto; z-index: 6;
+  display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center;
+  padding: 24px 26px 18px; border-radius: 30px; background: rgba(255,255,255,.78); border: 1px solid var(--line); box-shadow: var(--shadow);
+  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); width: max-content; max-width: min(580px, 92vw); }
+#start strong { font: italic 500 26px/1.1 var(--serif); }
+#start p { margin: 0; color: var(--muted); max-width: 400px; font-size: 13px; }
+.two { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+#typed { display: flex; gap: 6px; width: min(380px, 80vw); }
+#path { flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 9px 14px; border-radius: 999px; color: var(--ink);
+  border: 1px solid var(--line); background: var(--glass); outline: none; }
+.dest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; font-size: 13px; color: var(--muted);
+  padding: 8px 12px; border-radius: 16px; background: rgba(255,255,255,.6); border: 1px solid var(--line); }
+.dest b { color: var(--ink); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link { font: inherit; font-size: 13px; font-weight: 650; color: var(--rose); background: none; border: 0; padding: 2px 4px; cursor: pointer; }
+#total { position: absolute; left: 1%; top: 3%; z-index: 6; text-align: center; display: none; padding: 18px 30px; border-radius: 28px; pointer-events: none;
+  background: rgba(255,255,255,.8); border: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); animation: rise .7s cubic-bezier(.2,1.4,.4,1); }
+#total.on { display: block; }
+#total b { display: block; font: italic 500 clamp(48px, 6vw, 92px)/1 var(--serif); letter-spacing: -.03em;
+  background: linear-gradient(90deg, var(--rose), var(--plum)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+#total span { display: block; margin-top: 4px; font-size: 15px; font-weight: 650; }
+@keyframes rise { from { transform: translateY(14px) scale(.92); opacity: 0; } }
+
+#bar { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; min-height: 54px; }
+#words { text-align: center; max-width: 680px; min-width: 0; }
+#say { margin: 0; font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
+#say.bad { color: var(--bad); }
+#note { margin: 2px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; white-space: pre-line; }
+#actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+button { font: inherit; font-weight: 650; cursor: pointer; }
+.btn { padding: 12px 22px; border-radius: 999px; border: 1px solid var(--line); background: var(--glass-hi); color: var(--ink);
+  box-shadow: var(--shadow); backdrop-filter: blur(10px); transition: transform .15s, box-shadow .15s; }
+.btn:hover { transform: translateY(-1px); }
+.btn.main { background: var(--ink); color: #fff; border-color: var(--ink); display: inline-flex; align-items: center; gap: 9px; font-size: 16px; padding: 13px 26px; }
+.btn.main::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #6ec3ff; box-shadow: 0 0 10px #6ec3ff; }
+.btn.globe { display: inline-flex; align-items: center; gap: 9px; font-size: 16px; padding: 13px 24px; }
+.btn.globe::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--rose); box-shadow: 0 0 10px rgba(31,111,214,.6); }
+.btn.small { padding: 9px 16px; font-size: 13px; box-shadow: none; }
+kbd { font: 600 11px var(--sans); padding: 3px 7px; border-radius: 6px; background: rgba(255,255,255,.16); color: rgba(255,255,255,.85); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--rose); outline-offset: 2px; }
+
+.sheet { position: fixed; z-index: 20; border-radius: 28px; padding: 22px 24px;
+  background: rgba(255,255,255,.92); border: 1px solid var(--line); box-shadow: 0 40px 80px -30px rgba(30,60,110,.5); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+#peek { inset: 6vh 8vw; overflow: auto; }
+#peek header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+#peek h3 { margin: 0; flex: 1; font: italic 500 30px var(--serif); }
+#peekGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 14px; }
+#peekGrid figure { margin: 0; min-width: 0; }
+#peekGrid img { width: 100%; aspect-ratio: 1; object-fit: contain; display: block; background: #eef4fa; border-radius: 12px; padding: 6px; }
+#peekGrid figcaption { color: var(--muted); font-size: 12px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#confirm { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(520px, 92vw); text-align: center; display: flex; flex-direction: column; gap: 12px; align-items: center; animation: rise .4s cubic-bezier(.2,1.4,.4,1); }
+#confirm h3 { margin: 0; font: italic 500 30px/1.15 var(--serif); }
+#confirm p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+#confirm code { font: 600 13px ui-monospace, Menlo, monospace; color: var(--ink); background: #eef4fb; padding: 6px 10px; border-radius: 10px; display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+#scrim { position: fixed; inset: 0; z-index: 19; background: rgba(20,45,80,.18); backdrop-filter: blur(3px); }
+
+[hidden] { display: none !important; }
+#hint { position: fixed; left: 0; right: 0; bottom: 18px; text-align: center; color: var(--muted); font-size: 14px; display: none; z-index: 8; pointer-events: none; }
+body.film #hint.on { display: block; }
+body.film #bar, body.film .tools .ghost { display: none; }
+body.film { cursor: none; }
+
+@media (max-aspect-ratio: 1/1), (max-width: 900px) {
+  #app { padding: 16px 14px 14px; gap: 10px; }
+  #top { gap: 10px; }
+  .avatar { width: 38px; height: 38px; font-size: 16px; }
+  h1 { font-size: clamp(21px, 5.2vw, 32px); white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .tools .ghost { padding: 6px 10px; font-size: 12px; }
+  .status { display: none; }
+  #stats { grid-template-columns: repeat(4, 1fr); row-gap: 8px; padding: 12px 6px; border-radius: 22px; }
+  .stat.total { grid-column: 1 / -1; border-left: 0; text-align: center; }
+  .stat.total small { justify-content: center; }
+  .stat.total b { font-size: clamp(34px, 9vw, 52px); }
+  .stat:nth-child(2) { border-left: 0; }
+  .stat { padding: 0 8px; }
+  .stat small { font-size: 9px; letter-spacing: .08em; gap: 4px; white-space: normal; }
+  .stat b { font-size: clamp(22px, 5.5vw, 32px); }
+  #say { font-size: 14px; } #note { font-size: 11.5px; }
+  .btn.main, .btn.globe { font-size: 14px; padding: 10px 18px; } .btn { padding: 10px 18px; font-size: 14px; }
+  #total { padding: 10px 18px; left: auto; right: 2%; } #total span { font-size: 12px; }
+  #start { top: 30%; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<canvas id="stage" aria-hidden="true"></canvas>
+<div id="app">
+  <header id="top">
+    <div class="avatar" aria-hidden="true">P</div>
+    <div class="heading">
+      <div class="studio"><b id="title">File Sorter</b> · sorted on this Mac</div>
+      <h1 id="headline"></h1>
+    </div>
+    <div class="tools">
+      <span class="status" id="status"><i></i><span id="statusText">Ready</span></span>
+      <button class="ghost" id="soundBtn" type="button" aria-pressed="false">♪ Sound off</button>
+      <button class="ghost" id="film" type="button" hidden title="Space: next step. Esc: leave.">Film mode</button>
+    </div>
+  </header>
+
+  <section id="stats" aria-label="Counts">
+    <div class="stat total"><small>Files found</small><b id="sTotal">0</b></div>
+    <div class="stat"><small><i></i>Folders searched</small><b id="sFrom">0</b></div>
+    <div class="stat"><small><i></i>File types</small><b id="sTypes">0</b></div>
+    <div class="stat"><small>Bins filled</small><b id="sFolders">0</b></div>
+    <div class="stat"><small>Duplicates found</small><b id="sDups">0</b></div>
+  </section>
+
+  <section id="floor" aria-label="The sorting machine">
+    <div id="start">
+      <strong>Sort a messy computer</strong>
+      <div class="two">
+        <button id="pick" class="btn main" type="button">Pick a folder to tidy</button>
+        <button id="sweep" class="btn globe" type="button">Find files all over my computer</button>
+      </div>
+      <form id="typed"><input id="path" placeholder="or paste a folder path" aria-label="Folder path" autocomplete="off" spellcheck="false"><button class="btn small" type="submit">Load</button></form>
+      <div class="dest"><span>Sorted files go to</span><b id="destName">the same folder</b>
+        <button class="link" id="destPick" type="button">Choose…</button><button class="link" id="destClear" type="button" hidden>Use the same folder</button></div>
+      <p>Sorted on this Mac by file type. Nothing is sent anywhere. Nothing moves until you say so, and one click puts it all back.</p>
+    </div>
+    <div id="total"><b id="totalN">0</b><span id="totalWords">files sorted</span></div>
+  </section>
+
+  <footer id="bar">
+    <div id="words"><p id="say" role="status"></p><p id="note"></p></div>
+    <div id="actions">
+      <button id="sort" class="btn main" type="button" hidden>Start the machine <kbd>Space</kbd></button>
+      <button id="apply" class="btn main" type="button" hidden>Apply · move the files <kbd>Space</kbd></button>
+      <button id="undo" class="btn" type="button" hidden>Put everything back</button>
+      <button id="again" class="btn" type="button" hidden>Start again</button>
+    </div>
+  </footer>
+</div>
+<div id="hint">G: fill the hopper again. Space: next step. Esc: leave.</div>
+<div id="scrim" hidden></div>
+<section id="peek" class="sheet" hidden aria-label="Bin contents">
+  <header><h3 id="peekTitle"></h3><button id="closePeek" class="btn small" type="button">Close</button></header>
+  <div id="peekGrid"></div>
+</section>
+<section id="confirm" class="sheet" hidden tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+  <h3 id="confirmTitle"></h3>
+  <p id="confirmFrom"></p>
+  <code id="confirmDest"></code>
+  <p>Nothing is deleted or overwritten. One click puts it all back.</p>
+  <div class="two"><button id="yes" class="btn main" type="button">Yes, move them <kbd>Space</kbd></button><button id="no" class="btn" type="button">Not yet</button></div>
+</section>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const canvas = $("stage"), ctx = canvas.getContext("2d");
+const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const TAU = Math.PI * 2, SANS = '-apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif', MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
+const rnd = (a, b) => a + Math.random() * (b - a), clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v)), lerp = (a, b, t) => a + (b - a) * t;
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const bez = (a, b, c, t) => { const u = 1 - t; return u * u * a + 2 * u * t * b + t * t * c; };
+
+// The token arrives after the # so it never reaches a server log or a referrer.
+let token = location.hash.slice(1);
+try { if (token) sessionStorage.setItem("token", token); else token = sessionStorage.getItem("token") || ""; } catch {}
+history.replaceState(null, "", location.pathname);
+const headers = { "X-Token": token, "Content-Type": "application/json" };
+const post = (path, body = {}) => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+
+// ---------- Materials ----------
+// Brushed-steel grain, made once and laid over every steel part.
+const grain = (() => {
+  const c = document.createElement("canvas"); c.width = 256; c.height = 256;
+  const g = c.getContext("2d");
+  for (let i = 0; i < 900; i++) {
+    g.fillStyle = Math.random() < .5 ? "rgba(255,255,255,.35)" : "rgba(60,75,95,.18)";
+    g.fillRect(Math.random() * 256, Math.random() * 256, rnd(20, 140), rnd(.4, 1.1));
+  }
+  return c;
+})();
+function steel(g, x0, x1, y0, y1, dark = 0) {
+  const gr = g.createLinearGradient(x0, y0, x1, y1);
+  const s = [[0, "#aeb9c6"], [.18, "#e9eef4"], [.32, "#cdd6e0"], [.55, "#f7f9fb"], [.72, "#bcc7d3"], [1, "#9aa7b6"]];
+  s.forEach(([o, c]) => gr.addColorStop(o, dark ? shade(c, dark) : c));
+  return gr;
+}
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16), f = 1 - k;
+  return `rgb(${(n >> 16 & 255) * f | 0},${(n >> 8 & 255) * f | 0},${(n & 255) * f | 0})`;
+}
+function brushed(g, path, fill) {
+  g.save(); g.fillStyle = fill; g.fill(path); g.clip(path);
+  g.globalAlpha = .55; g.fillStyle = g.createPattern(grain, "repeat"); g.fill(path); g.restore();
+}
+function rivet(g, x, y, r = 2.6) {
+  const gr = g.createRadialGradient(x - r * .4, y - r * .4, r * .2, x, y, r);
+  gr.addColorStop(0, "#fff"); gr.addColorStop(.5, "#c3ccd6"); gr.addColorStop(1, "#6f7c8c");
+  g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+}
+function softShadow(g, x, y, w, h, a = .22) {
+  const gr = g.createRadialGradient(x, y, 0, x, y, w / 2);
+  gr.addColorStop(0, `rgba(30,55,90,${a})`); gr.addColorStop(1, "rgba(30,55,90,0)");
+  g.save(); g.translate(x, y); g.scale(1, h / w); g.translate(-x, -y); g.fillStyle = gr; g.beginPath(); g.arc(x, y, w / 2, 0, TAU); g.fill(); g.restore();
+}
+function rr(x, y, w, h, r) { const p = new Path2D(); p.roundRect(x, y, w, h, r); return p; }
+
+// ---------- File pictures ----------
+const IMG = new Set("jpg jpeg png heic heif gif webp tif tiff bmp svg".split(" "));
+const VID = new Set("mov mp4 m4v avi mkv webm".split(" ")), AUD = new Set("mp3 m4a wav aiff aif flac aac ogg".split(" "));
+const EXT_COLOR = { pdf: "#e5484d", doc: "#2f6fdb", docx: "#2f6fdb", txt: "#74839a", md: "#5a6b82", xls: "#1f9d55", xlsx: "#1f9d55", csv: "#2fb36a",
+  ppt: "#e8772e", pptx: "#e8772e", key: "#3a8ee6", png: "#21a3d6", jpg: "#0ea5a4", jpeg: "#0ea5a4", heic: "#14b8a6", gif: "#8b5cf6",
+  mp4: "#d6336c", mov: "#c2255c", mp3: "#9b5de5", wav: "#7c4ddb", zip: "#8a94a6", dmg: "#5b6475", py: "#3b4a5e", js: "#c99a06", html: "#e0612f", json: "#4f5d73", sh: "#2a3446" };
+const extOf = name => { const i = name.lastIndexOf("."); return i > 0 ? name.slice(i + 1).toLowerCase() : ""; };
+const colorOf = ext => EXT_COLOR[ext] || "#74839a";
+// A file Quick Look couldn't draw: a plain page with its type on a badge.
+const ICONS = new Map();
+function iconFor(ext) {
+  if (ICONS.has(ext)) return ICONS.get(ext);
+  const c = document.createElement("canvas"); c.width = 128; c.height = 160;
+  const g = c.getContext("2d"), col = colorOf(ext);
+  g.fillStyle = "#fff"; g.beginPath(); g.moveTo(10, 4); g.lineTo(92, 4); g.lineTo(118, 30); g.lineTo(118, 154); g.lineTo(10, 154); g.closePath(); g.fill();
+  g.strokeStyle = "#d4dde8"; g.lineWidth = 2; g.stroke();
+  g.fillStyle = "#e3ebf5"; g.beginPath(); g.moveTo(92, 4); g.lineTo(92, 30); g.lineTo(118, 30); g.closePath(); g.fill();
+  g.fillStyle = "#dbe3ee"; for (let i = 0; i < 5; i++) g.fillRect(24, 40 + i * 13, [80, 66, 74, 52, 70][i], 5);
+  g.fillStyle = col; g.beginPath(); g.roundRect(20, 112, 88, 30, 7); g.fill();
+  g.fillStyle = "#fff"; g.font = `800 ${ext.length > 3 ? 17 : 20}px ${SANS}`; g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText((ext || "file").toUpperCase().slice(0, 5), 64, 128);
+  const pic = { canvas: c, url: c.toDataURL() };
+  ICONS.set(ext, pic);
+  return pic;
+}
+// A Quick Look picture, laid on white paper with a thin edge.
+function paper(bmp) {
+  const k = 150 / Math.max(bmp.width, bmp.height), w = Math.max(20, bmp.width * k), h = Math.max(20, bmp.height * k);
+  const c = document.createElement("canvas"); c.width = Math.ceil(w + 8); c.height = Math.ceil(h + 8);
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(bmp, 4, 4, w, h);
+  g.strokeStyle = "rgba(120,140,165,.45)"; g.lineWidth = 1.5; g.strokeRect(.75, .75, c.width - 1.5, c.height - 1.5);
+  return c;
+}
+
+// ---------- World ----------
+let W = 0, H = 0, S = 1, M = null, layers = null;
+let view = { phase: "start", names: [], folders: [], results: {}, duplicates: {}, from: [], sources: [], thumbs: [] };
+let sprites = new Map(), loadedKey = "", pile = [], queue = [], seen = new Set(), flying = 0, belt = [], bins = [];
+let beltSpeed = 0, beltPos = 0, scanFlash = 0, kickT = 0, display = { text: "READY", color: "#7ee0ff", t: 0 };
+const particles = [], landTimes = [];
+const filming = () => document.body.classList.contains("film");
+const wantDpr = () => Math.min(devicePixelRatio || 1, view.names.length > 300 ? 1.5 : 2);
+
+function resize() {
+  const dpr = wantDpr(); W = innerWidth; H = innerHeight; canvas.width = W * dpr; canvas.height = H * dpr; S = dpr;
+  layout(); positionStuck();
+}
+addEventListener("resize", resize);
+
+// Machine layout from the floor panel. Wide windows put the bins in two rows of six; tall ones in three rows of four.
+function layout() {
+  const r = $("floor").getBoundingClientRect();
+  const x = r.left, y = r.top, w = r.width, h = Math.max(220, r.height), tall = w / h < 1.25;
+  const m = { x, y, w, h, tall };
+  m.doc = Math.max(22, Math.min(h * (tall ? .085 : .1), w * .055));
+  m.bh = Math.max(14, h * .034); m.th = m.bh * .55;
+  m.beltY = y + h * (tall ? .4 : .46); m.beltTop = m.beltY - m.bh / 2; m.bx0 = x + w * .035; m.bx1 = x + w * .965;
+  m.rideY = m.beltTop - m.th / 2 - m.doc * .42;
+  m.hx = x + w * (tall ? .21 : .145); m.hTop = y + h * .005; m.hBot = m.beltTop - m.doc * 1.25;
+  m.hTw = w * (tall ? .38 : .235); m.hBw = m.hTw * .3;
+  m.sx = x + w * (tall ? .57 : .465); m.kx = x + w * (tall ? .8 : .655);
+  m.cab = tall ? null : { x: x + w * .765, y: y + h * .015, w: w * .185 };
+  if (m.cab) m.cab.h = m.beltTop - m.cab.y - m.bh * 1.6;
+  m.legBot = m.beltY + h * .085;
+  const cols = tall ? 4 : 6, rows = tall ? 3 : 2, top = m.legBot + h * .03, bottom = y + h - 2, gx = w * .012;
+  const bw = (w * .96 - gx * (cols - 1)) / cols, bh = (bottom - top - gx * (rows - 1)) / rows;
+  m.bins = view.folders.map((name, i) => ({ name, x: x + w * .02 + (i % cols) * (bw + gx), y: top + Math.floor(i / cols) * (bh + gx), w: bw, h: bh }));
+  m.binDoc = Math.min(m.bins[0]?.h * .34 || 30, m.bins[0]?.w * .2 || 30);
+  M = m; bake();
+  bins = m.bins.map((b, i) => Object.assign(bins[i] && bins[i].name === b.name ? bins[i] : { count: 0, shown: 0, pulse: 0, members: [], inbound: 0 }, b));
+}
+
+function painted(g, x0, x1) {
+  const gr = g.createLinearGradient(x0, 0, x1, 0);
+  [[0, "#123f80"], [.2, "#2f74d0"], [.42, "#78b2f4"], [.6, "#2a6cc6"], [1, "#0f3a78"]].forEach(([o, c]) => gr.addColorStop(o, c));
+  return gr;
+}
+function hazard(g, x, y, w, h) {
+  g.save(); g.beginPath(); g.roundRect(x, y, w, h, 2); g.clip();
+  g.fillStyle = "#ffc83d"; g.fillRect(x, y, w, h); g.fillStyle = "#1d2228";
+  for (let k = -h; k < w + h; k += h * 1.4) { g.beginPath(); g.moveTo(x + k, y + h); g.lineTo(x + k + h * .7, y + h); g.lineTo(x + k + h * 1.4, y); g.lineTo(x + k + h * .7, y); g.closePath(); g.fill(); }
+  g.restore();
+}
+function tube(g, pts, r) {
+  g.save(); g.lineCap = "round"; g.lineJoin = "round";
+  const path = () => { g.beginPath(); g.moveTo(pts[0], pts[1]); g.bezierCurveTo(pts[2], pts[3], pts[4], pts[5], pts[6], pts[7]); };
+  path(); g.strokeStyle = "#20262e"; g.lineWidth = r * 2; g.stroke();
+  path(); g.strokeStyle = "#3b4450"; g.lineWidth = r * 1.3; g.stroke();
+  path(); g.strokeStyle = "rgba(255,255,255,.28)"; g.lineWidth = r * .35; g.translate(-r * .3, -r * .3); g.stroke();
+  g.restore();
+}
+function ibeam(g, x, y0, y1, wd) {
+  brushed(g, rr(x - wd / 2, y0, wd, y1 - y0, 2), steel(g, x - wd / 2, x + wd / 2, 0, 0, .28));
+  g.fillStyle = "rgba(30,40,55,.25)"; g.fillRect(x - wd * .12, y0, wd * .24, y1 - y0);
+  g.fillStyle = "#4f5b6b"; g.beginPath(); g.roundRect(x - wd * 1.3, y1 - 3, wd * 2.6, 6, 2); g.fill();
+  rivet(g, x - wd * .9, y1, 1.6); rivet(g, x + wd * .9, y1, 1.6);
+}
+
+// ---------- Static parts, drawn once per size ----------
+function bake() {
+  const make = () => { const c = document.createElement("canvas"); c.width = W * S; c.height = H * S; const g = c.getContext("2d"); g.scale(S, S); return [c, g]; };
+  const [back, b] = make(), [front, f] = make(), m = M;
+  // The floor the machine stands on
+  const fl = b.createLinearGradient(0, m.beltY, 0, m.y + m.h); fl.addColorStop(0, "rgba(110,140,185,0)"); fl.addColorStop(1, "rgba(110,140,185,.13)");
+  b.fillStyle = fl; b.fillRect(0, m.beltY, W, m.y + m.h - m.beltY + 30);
+  softShadow(b, (m.bx0 + m.bx1) / 2, m.legBot, m.bx1 - m.bx0, m.h * .05, .2);
+  softShadow(b, m.hx, m.legBot, m.hTw * 1.15, m.h * .04, .2);
+  // Conveyor legs and a brace
+  const legs = m.tall ? 4 : 6;
+  for (let i = 0; i < legs; i++) ibeam(b, lerp(m.bx0 + 26, m.bx1 - 26, i / (legs - 1)), m.beltY, m.legBot, Math.max(7, m.w * .006));
+  brushed(b, rr(m.bx0 + 20, m.legBot - m.h * .03, m.bx1 - m.bx0 - 40, 5, 2), steel(b, 0, 0, m.legBot - 30, m.legBot, .3));
+  // Drive motor at the belt start, with a guard
+  const mw = m.w * .055, mh = m.h * .06, mx = m.bx0 + 6, my = m.beltY + m.bh * .5;
+  brushed(b, rr(mx, my, mw, mh, 7), steel(b, mx, mx + mw, my, my + mh, .12));
+  b.fillStyle = "rgba(25,35,50,.55)"; for (let i = 0; i < 6; i++) b.fillRect(mx + 8 + i * (mw - 16) / 6, my + 7, 2.2, mh - 14);
+  b.fillStyle = "#48d17a"; b.beginPath(); b.arc(mx + mw - 8, my + 8, 2.5, 0, TAU); b.fill();
+  // Hopper legs, brace and vibration motor
+  for (const side of [-1, 1]) ibeam(b, m.hx + side * m.hTw * .4, m.hTop + m.h * .1, m.legBot, Math.max(8, m.w * .007));
+  brushed(b, rr(m.hx - m.hTw * .4, m.hBot + m.h * .02, m.hTw * .8, 6, 2), steel(b, 0, 0, m.hBot, m.hBot + 8, .3));
+  const vx = m.hx + m.hTw * .5 - 2, vy = m.hTop + m.h * .012;
+  brushed(b, rr(vx, vy, m.hTw * .14, m.h * .07, 6), steel(b, vx, vx + m.hTw * .14, vy, vy + m.h * .07, .2));
+  b.fillStyle = "#1f6fd6"; b.fillRect(vx + 4, vy + m.h * .07 - 9, m.hTw * .14 - 8, 4);
+  // Scanner pillars, painted blue, behind the belt
+  const sw = m.doc * 2.3, sh = m.h * .24, sTop = m.beltTop - sh;
+  for (const px of [m.sx - sw / 2 - 14, m.sx + sw / 2]) {
+    b.fillStyle = painted(b, px, px + 14); b.beginPath(); b.roundRect(px, sTop, 14, m.legBot - sTop, 3); b.fill();
+    b.fillStyle = "#3c4756"; b.beginPath(); b.roundRect(px - 6, m.legBot - 4, 26, 7, 2); b.fill();
+  }
+  // Kicker post behind the belt
+  const kpx = m.kx + m.doc * 1.05, armY = m.beltTop - m.h * .25;
+  ibeam(b, kpx, armY, m.legBot, Math.max(8, m.w * .007));
+  // Control cabinet
+  if (m.cab) {
+    const c = m.cab;
+    ibeam(b, c.x + c.w * .2, c.y + c.h - 10, m.legBot, 8); ibeam(b, c.x + c.w * .8, c.y + c.h - 10, m.legBot, 8);
+    softShadow(b, c.x + c.w / 2, m.legBot, c.w * 1.1, 16, .18);
+    const body = rr(c.x, c.y, c.w, c.h, 12);
+    b.save(); b.shadowColor = "rgba(30,55,90,.3)"; b.shadowBlur = 18; b.shadowOffsetY = 8; b.fillStyle = "#c9d3de"; b.fill(body); b.restore();
+    brushed(b, body, steel(b, c.x, c.x + c.w, c.y, c.y + c.h, .02));
+    b.strokeStyle = "rgba(60,75,95,.45)"; b.lineWidth = 1.2; b.stroke(body);
+    b.strokeStyle = "rgba(255,255,255,.8)"; b.beginPath(); b.roundRect(c.x + 6, c.y + 6, c.w - 12, c.h - 12, 8); b.stroke();
+    hazard(b, c.x + 10, c.y + c.h - 16, c.w - 20, 7);
+    c.scr = { x: c.x + 14, y: c.y + 16, w: c.w - 28, h: c.h * .42 };
+    b.fillStyle = "#08121c"; b.beginPath(); b.roundRect(c.scr.x - 3, c.scr.y - 3, c.scr.w + 6, c.scr.h + 6, 7); b.fill();
+    const r = Math.min(c.w * .17, c.h * .17);
+    c.gauge = { x: c.x + c.w * .3, y: c.scr.y + c.scr.h + r + 16, r };
+    const gg = b.createRadialGradient(c.gauge.x, c.gauge.y - r * .3, 1, c.gauge.x, c.gauge.y, r);
+    gg.addColorStop(0, "#ffffff"); gg.addColorStop(1, "#dfe6ee");
+    b.fillStyle = gg; b.beginPath(); b.arc(c.gauge.x, c.gauge.y, r, 0, TAU); b.fill();
+    b.strokeStyle = "#7d8a9a"; b.lineWidth = 3; b.stroke();
+    for (let k = 0; k <= 10; k++) {
+      const a = Math.PI * (.75 + k * .15), r0 = r * (k % 5 ? .78 : .7);
+      b.strokeStyle = k > 7 ? "#e5484d" : "#1d2939"; b.lineWidth = k % 5 ? 1 : 2;
+      b.beginPath(); b.moveTo(c.gauge.x + Math.cos(a) * r0, c.gauge.y + Math.sin(a) * r0); b.lineTo(c.gauge.x + Math.cos(a) * r * .9, c.gauge.y + Math.sin(a) * r * .9); b.stroke();
+    }
+    b.fillStyle = "#74839a"; b.font = `700 ${Math.max(7, r * .2)}px ${SANS}`; b.textAlign = "center"; b.fillText("BELT", c.gauge.x, c.gauge.y + r * .5);
+    // Emergency stop and the run lamp
+    const ex = c.x + c.w * .72, ey = c.gauge.y, er = r * .62;
+    b.fillStyle = "#ffc83d"; b.beginPath(); b.arc(ex, ey, er * 1.35, 0, TAU); b.fill();
+    const red = b.createRadialGradient(ex - er * .35, ey - er * .35, 1, ex, ey, er);
+    red.addColorStop(0, "#ff8a8a"); red.addColorStop(.5, "#e5484d"); red.addColorStop(1, "#8f1d22");
+    b.fillStyle = red; b.beginPath(); b.arc(ex, ey, er, 0, TAU); b.fill();
+    b.fillStyle = "#1d2939"; b.font = `800 ${Math.max(6, er * .38)}px ${SANS}`; b.fillText("STOP", ex, ey + er * 1.35 + Math.max(7, er * .5));
+    c.lamp = { x: c.x + c.w * .5, y: c.gauge.y + r * .2, r: Math.max(4, r * .18) };
+  }
+  // Bins: open steel crates
+  m.bins.forEach((bn, i) => {
+    softShadow(b, bn.x + bn.w / 2, bn.y + bn.h, bn.w * 1.05, 14, .22);
+    const lip = Math.max(6, bn.h * .06);
+    const inner = rr(bn.x + 3, bn.y + lip * .5, bn.w - 6, bn.h * .62, [9, 9, 0, 0]);
+    const gr = b.createLinearGradient(0, bn.y, 0, bn.y + bn.h * .62); gr.addColorStop(0, "#5a6879"); gr.addColorStop(1, "#2a3441");
+    brushed(b, inner, gr);
+    b.fillStyle = "rgba(0,0,0,.18)"; b.fillRect(bn.x + 3, bn.y + lip * .5, 8, bn.h * .6); b.fillRect(bn.x + bn.w - 11, bn.y + lip * .5, 8, bn.h * .6);
+    const rim = b.createLinearGradient(0, bn.y, 0, bn.y + lip); rim.addColorStop(0, "#ffffff"); rim.addColorStop(1, "#8d9aab");
+    b.fillStyle = rim; b.beginPath(); b.roundRect(bn.x, bn.y, bn.w, lip, [9, 9, 3, 3]); b.fill();
+  });
+  // Hopper: steel body with a glass window
+  const hp = hopperPath(m), win = hopperWindow(m);
+  b.save(); b.shadowColor = "rgba(30,55,90,.3)"; b.shadowBlur = 20; b.shadowOffsetY = 10; b.fillStyle = "#b9c4d0"; b.fill(hp); b.restore();
+  brushed(f, hp, steel(f, m.hx - m.hTw / 2, m.hx + m.hTw / 2, 0, 0));
+  f.save(); f.globalCompositeOperation = "destination-out"; f.fill(win); f.restore();
+  f.strokeStyle = "rgba(70,85,105,.55)"; f.lineWidth = 1.5; f.stroke(hp);
+  f.strokeStyle = "#e8eef5"; f.lineWidth = 5; f.stroke(win); f.strokeStyle = "rgba(60,75,95,.6)"; f.lineWidth = 1.2; f.stroke(win);
+  const rim = f.createLinearGradient(0, m.hTop - 6, 0, m.hTop + 8); rim.addColorStop(0, "#fff"); rim.addColorStop(.5, "#c7d1dc"); rim.addColorStop(1, "#6f7c8c");
+  f.fillStyle = rim; f.beginPath(); f.roundRect(m.hx - m.hTw / 2 - 7, m.hTop - 6, m.hTw + 14, 13, 7); f.fill();
+  const n = 9;
+  for (let i = 0; i < n; i++) rivet(f, lerp(m.hx - m.hTw / 2 + 12, m.hx + m.hTw / 2 - 12, i / (n - 1)), m.hTop + 15);
+  hazard(f, m.hx - m.hTw / 2 + 8, m.hTop + m.h * .045, m.hTw - 16, 7);
+  const py = win.b + 6, pw = Math.min(m.hTw * .6, 170);
+  f.fillStyle = "#1d2939"; f.beginPath(); f.roundRect(m.hx - pw / 2, py, pw, 18, 4); f.fill();
+  rivet(f, m.hx - pw / 2 + 6, py + 9, 1.6); rivet(f, m.hx + pw / 2 - 6, py + 9, 1.6);
+  f.fillStyle = "#cfe3ff"; f.font = `700 ${Math.min(10.5, pw / 15)}px ${SANS}`; f.textAlign = "center"; f.textBaseline = "middle";
+  f.fillText("FS-2  AUTO SORTER", m.hx, py + 9.5);
+  // Feeder chute
+  const ch = new Path2D(); ch.moveTo(m.hx - m.hBw / 2, m.hBot); ch.lineTo(m.hx + m.hBw / 2, m.hBot); ch.lineTo(m.hx + m.hBw / 2 + 5, m.beltTop - m.th - m.doc * .75); ch.lineTo(m.hx - m.hBw / 2 - 5, m.beltTop - m.th - m.doc * .75); ch.closePath();
+  f.save(); f.globalAlpha = .6; brushed(f, ch, steel(f, m.hx - m.hBw, m.hx + m.hBw, 0, 0, .2)); f.restore();
+  // Belt side channel (front), with the start guard
+  const rail = rr(m.bx0 - 8, m.beltTop + m.bh * .2, m.bx1 - m.bx0 + 16, m.bh * .7, 4);
+  brushed(f, rail, steel(f, 0, 0, m.beltTop, m.beltTop + m.bh, .04));
+  f.fillStyle = "#1f6fd6"; f.fillRect(m.bx0, m.beltTop + m.bh * .62, m.bx1 - m.bx0, 2);
+  for (let x = m.bx0 + 16; x < m.bx1 - 6; x += 52) rivet(f, x, m.beltTop + m.bh * .42, 2);
+  hazard(f, m.bx0 - 8, m.beltTop + m.bh * .9, m.w * .05, 6); hazard(f, m.bx1 - m.w * .05 + 8, m.beltTop + m.bh * .9, m.w * .05, 6);
+  // Scanner top housing
+  const hx0 = m.sx - sw / 2 - 20, hy0 = sTop - m.h * .08, hw = sw + 40, hh = m.h * .09;
+  f.save(); f.shadowColor = "rgba(30,55,90,.35)"; f.shadowBlur = 14; f.shadowOffsetY = 6; f.fillStyle = "#c3cdd8"; f.beginPath(); f.roundRect(hx0, hy0, hw, hh, 9); f.fill(); f.restore();
+  brushed(f, rr(hx0, hy0, hw, hh, 9), steel(f, 0, 0, hy0, hy0 + hh, .06));
+  f.fillStyle = painted(f, hx0, hx0 + hw); f.fillRect(hx0, hy0 + hh - 6, hw, 6);
+  f.fillStyle = "#08121c"; f.beginPath(); f.roundRect(hx0 + 8, hy0 + 8, hw - 16, hh - 20, 5); f.fill();
+  m.disp = { x: hx0 + 8, y: hy0 + 8, w: hw - 16, h: hh - 20, lights: hy0 - 6, right: hx0 + hw - 6 };
+  // Kicker: arm, cylinder and its air hose
+  const cylX = m.kx, cylTop = armY + 6, cylH = m.h * .085, cw = m.doc * .42;
+  brushed(f, rr(cylX - 6, armY - 6, kpx - cylX + 12, 12, 4), steel(f, 0, 0, armY - 6, armY + 6, .12));
+  brushed(f, rr(cylX - cw / 2, cylTop, cw, cylH, 6), steel(f, cylX - cw / 2, cylX + cw / 2, 0, 0, .02));
+  f.fillStyle = "#1f6fd6"; f.fillRect(cylX - cw / 2, cylTop + cylH * .35, cw, 4);
+  hazard(f, cylX - cw / 2, cylTop + cylH - 8, cw, 6);
+  m.kick = { x: cylX, top: cylTop + cylH, w: cw };
+  if (m.cab) tube(f, [cylX + cw / 2, cylTop + 8, cylX + m.w * .05, cylTop - m.h * .12, m.cab.x - m.w * .03, m.cab.y + m.cab.h * .8, m.cab.x, m.cab.y + m.cab.h * .7], 3.5);
+  // Crate fronts with label plates, stencil numbers and counters
+  m.bins.forEach((bn, i) => {
+    const fy = bn.y + bn.h * .5, fh = bn.h * .5;
+    const face = rr(bn.x, fy, bn.w, fh, [4, 4, 12, 12]);
+    f.save(); f.shadowColor = "rgba(20,40,70,.25)"; f.shadowBlur = 8; f.shadowOffsetY = -2; f.fillStyle = "#c9d3de"; f.fill(face); f.restore();
+    brushed(f, face, steel(f, bn.x, bn.x + bn.w, fy, fy + fh, .03));
+    f.strokeStyle = "rgba(70,85,105,.5)"; f.lineWidth = 1; f.stroke(face);
+    const lipG = f.createLinearGradient(0, fy, 0, fy + 6); lipG.addColorStop(0, "#ffffff"); lipG.addColorStop(1, "#97a4b4");
+    f.fillStyle = lipG; f.beginPath(); f.roundRect(bn.x, fy, bn.w, 6, 3); f.fill();
+    rivet(f, bn.x + 8, fy + 13, 2); rivet(f, bn.x + bn.w - 8, fy + 13, 2); rivet(f, bn.x + 8, fy + fh - 9, 2); rivet(f, bn.x + bn.w - 8, fy + fh - 9, 2);
+    const lw = bn.w * .7, lh = Math.min(fh * .32, 26), lx = bn.x + (bn.w - lw) / 2 + bn.w * .05, ly = fy + fh * .2;
+    f.fillStyle = "#fbfdff"; f.beginPath(); f.roundRect(lx, ly, lw, lh, 4); f.fill(); f.strokeStyle = "rgba(60,80,110,.35)"; f.stroke();
+    let fs = Math.min(lh * .55, 14); f.font = `700 ${fs}px ${SANS}`;
+    while (f.measureText(bn.name).width > lw - 10 && fs > 7) { fs -= .5; f.font = `700 ${fs}px ${SANS}`; }
+    f.fillStyle = "#1d2939"; f.textAlign = "center"; f.textBaseline = "middle"; f.fillText(bn.name, lx + lw / 2, ly + lh / 2 + .5);
+    f.fillStyle = "rgba(240,180,40,.9)"; f.font = `900 ${Math.min(lh * .7, 16)}px ${SANS}`; f.textAlign = "left";
+    f.fillText(String(i + 1).padStart(2, "0"), bn.x + 6, ly + lh / 2 + .5);
+    bn.lcd = { x: bn.x + bn.w / 2 - bn.w * .2, y: ly + lh + fh * .1, w: bn.w * .4, h: Math.min(fh * .28, 22) };
+  });
+  layers = { back, front };
+}
+function hopperPath(m) {
+  const p = new Path2D(), sh = m.h * .08;
+  p.moveTo(m.hx - m.hTw / 2, m.hTop); p.lineTo(m.hx + m.hTw / 2, m.hTop);
+  p.lineTo(m.hx + m.hTw / 2, m.hTop + sh); p.lineTo(m.hx + m.hBw / 2, m.hBot); p.lineTo(m.hx - m.hBw / 2, m.hBot);
+  p.lineTo(m.hx - m.hTw / 2, m.hTop + sh); p.closePath(); return p;
+}
+function hopperWindow(m) {
+  const t = m.hTop + m.h * .075, b = m.hBot - m.h * .07, sh = m.h * .08;
+  const widthAt = y => y <= m.hTop + sh ? m.hTw : lerp(m.hTw, m.hBw, (y - m.hTop - sh) / (m.hBot - m.hTop - sh));
+  const wt = widthAt(t) - 26, wb = widthAt(b) - 26;
+  const p = new Path2D(); p.moveTo(m.hx - wt / 2, t); p.lineTo(m.hx + wt / 2, t); p.lineTo(m.hx + wb / 2, b); p.lineTo(m.hx - wb / 2, b); p.closePath();
+  return Object.assign(p, { t, b, wt, wb });
+}
+
+// ---------- Sprites ----------
+function fit(s, size) { const a = s.pic.width / s.pic.height; return a >= 1 ? [size, size / a] : [size * a, size]; }
+function draw(s, x, y, size, rot = 0, a = 1, lift = 0) {
+  const [w, h] = fit(s, size);
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); if (rot) ctx.rotate(rot);
+  ctx.shadowColor = "rgba(20,40,70,.35)"; ctx.shadowBlur = 4 + lift * 10; ctx.shadowOffsetY = 2 + lift * 6;
+  ctx.drawImage(s.pic, -w / 2, -h / 2, w, h); ctx.restore();
+}
+function ensureSprites(st) {
+  const key = (st.sources || []).join("\n") + "|" + st.names.length;
+  if (loadedKey !== key) { clearStage(); loadedKey = key; }
+  st.names.forEach((name, id) => {
+    if (sprites.has(id)) return;
+    const ext = extOf(name), icon = iconFor(ext);
+    sprites.set(id, { id, name, ext, pic: icon.canvas, url: icon.url, state: "wait", x: 0, y: 0, rot: 0, a: 1, size: 0 });
+  });
+  for (const id of st.thumbs || []) loadPreview(id);
+  // Files with no picture join once the scan is finished.
+  if (st.phase !== "scanning") for (const s of sprites.values()) if (s.state === "wait" && !s.loading) dropIn(s);
+}
+const loading = new Set();
+async function loadPreview(id) {
+  const s = sprites.get(id);
+  if (!s || s.loading || s.loaded) return;
+  s.loading = true; loading.add(id);
+  try {
+    const key = loadedKey, r = await fetch(`/api/thumb/${id}`, { headers: { "X-Token": token } });
+    if (r.ok && key === loadedKey) {
+      const blob = await r.blob(), bmp = await createImageBitmap(blob);
+      s.pic = paper(bmp); s.url = URL.createObjectURL(blob); s.loaded = true;
+    }
+  } catch {}
+  s.loading = false; loading.delete(id);
+  if (s.state === "wait") dropIn(s);
+}
+// Fly in from a random spot off screen, into the hopper's mouth.
+function dropIn(s, spread = 0) {
+  s.hopSlot = pile.length; pile.push(s);
+  if (calm) { s.state = "hopper"; s.arrived = true; return; }
+  const a = rnd(0, TAU), R = Math.hypot(W, H) * .62;
+  s.g = { sx: W / 2 + Math.cos(a) * R, sy: H / 2 + Math.sin(a) * R, t: -rnd(0, spread), dur: rnd(.9, 1.4), r0: rnd(-2, 2) };
+  s.state = "in-air"; s.arrived = false;
+}
+function regather() {
+  const all = pile.slice(); pile = [];
+  all.forEach(s => dropIn(s, Math.min(1.6, .3 + all.length / 600)));
+}
+function hopperSpot(i) {
+  const win = hopperWindow(M), per = Math.max(4, Math.floor(win.wb / (M.doc * .55))), rows = Math.floor((win.b - win.t) / (M.doc * .32));
+  const cap = per * rows, row = Math.floor(i / per) % Math.max(rows, 1), col = i % per;
+  const y = win.b - M.doc * .3 - row * M.doc * .32, k = (y - win.t) / (win.b - win.t), wdt = lerp(win.wt, win.wb, k) - M.doc * .5;
+  const seed = Math.sin(i * 12.9898) * 43758.5453, j = seed - Math.floor(seed);
+  return { x: M.hx - wdt / 2 + (col + .5) / per * wdt + (j - .5) * 8, y, rot: (j - .5) * .9, hidden: i >= cap };
+}
+
+// ---------- The run ----------
+function binOf(name) { return bins.find(b => b.name === name); }
+function binSpot(b, k) {
+  const cols = Math.max(2, Math.floor((b.w - 16) / (M.binDoc * .62))), maxRows = Math.max(2, Math.floor(b.h * .52 / (M.binDoc * .22)));
+  const row = Math.min(Math.floor(k / cols), maxRows - 1), col = k % cols, seed = Math.sin(k * 78.233 + b.x) * 43758.5453, j = seed - Math.floor(seed);
+  return { x: b.x + 10 + (col + .5) * (b.w - 20) / cols + (j - .5) * 6, y: b.y + b.h * .52 - row * M.binDoc * .22 - M.binDoc * .05, rot: (j - .5) * .7 };
+}
+let lastReleasePos = -1e9;
+function release(now) {
+  if (!queue.length) return;
+  if (!calm && beltPos - lastReleasePos < M.doc * .85) return;  // one file per gap on the belt
+  const i = queue.findIndex(q => q.state === "hopper");  // one still flying in waits its turn
+  if (i < 0) return;
+  const s = queue.splice(i, 1)[0], at = pile.indexOf(s);
+  if (at >= 0) pile.splice(at, 1);
+  s.category = view.results[s.id];
+  if (calm) { land(s, binOf(s.category)); return release(now); }
+  lastReleasePos = beltPos;
+  s.state = "drop"; s.dt = 0; s.x = M.hx; s.y0 = M.hBot; s.y = M.hBot;
+}
+function kick(s) {
+  const b = binOf(s.category);
+  if (!b) return;
+  kickT = 1; puff(s.x, s.y + M.doc * .3);
+  const to = binSpot(b, b.count + b.inbound++), dx = to.x - s.x;
+  s.fly = { fx: s.x, fy: s.y, tx: to.x, ty: to.y, cx: s.x + dx * .45, cy: Math.min(s.y, to.y) - M.h * (.12 + Math.abs(dx) / M.w * .25), r0: s.rot, r1: to.rot, b };
+  s.state = "fly"; s.t = 0; s.dur = clamp(.45 + Math.abs(dx) / M.w * .6, .45, 1.05); flying++;
+  clack();
+}
+function land(s, b, spot) {
+  if (!b) return;
+  spot ||= binSpot(b, b.count);
+  s.state = "bin"; s.x = spot.x; s.y = spot.y; s.rot = spot.rot; s.bin = b; s.bump = 1;
+  b.count++; b.pulse = 1; b.members.push(s); b.inbound = Math.max(0, (b.inbound || 0) - 1); landTimes.push(performance.now());
+  tick(b);
+}
+function puff(x, y) { if (calm) return; for (let i = 0; i < 6; i++) particles.push({ x, y, vx: rnd(-60, 60), vy: rnd(-90, -20), life: 1 }); }
+
+function update(dt, now) {
+  const running = view.phase === "review" && (queue.length || belt.length || flying);
+  const n = Math.max(sprites.size, 1), target = running ? clamp(n * M.doc * .85 / 14, 160, 2600) : (view.phase === "scanned" ? 40 : 18);
+  const t0 = running ? clamp((now - runStart) / 4000) : 1;
+  beltSpeed = lerp(beltSpeed, running ? lerp(140, target, ease(t0)) : target, Math.min(1, dt * 2));
+  if (!calm) beltPos += beltSpeed * dt;
+  scanFlash = Math.max(0, scanFlash - dt * 5); kickT = Math.max(0, kickT - dt * 6);
+  if (view.phase === "review") release(now);
+  for (const s of sprites.values()) {
+    if (s.state === "in-air") {
+      s.g.t += dt;
+      if (s.g.t < 0) continue;
+      const p = clamp(s.g.t / s.g.dur), e = ease(p), mx = M.hx, my = M.hTop - M.doc * .2;
+      const cx = (s.g.sx + mx) / 2 + (my - s.g.sy) * .3, cy = (s.g.sy + my) / 2 - (mx - s.g.sx) * .3;
+      s.x = bez(s.g.sx, cx, mx, e); s.y = bez(s.g.sy, cy, my, e); s.rot = s.g.r0 * (1 - e); s.size = M.doc * lerp(2.2, .9, e); s.a = clamp(p * 4);
+      if (p >= 1) { s.state = "hopper"; s.arrived = true; s.bump = 1; }
+    } else if (s.state === "drop") {
+      s.dt += dt / .16; s.x += beltSpeed * dt * .2;
+      s.y = lerp(s.y0, M.rideY, ease(clamp(s.dt))); s.rot = lerp(s.rot, 0, clamp(s.dt));
+      if (s.dt >= 1) { s.state = "belt"; belt.push(s); }
+    } else if (s.state === "belt") {
+      s.x += beltSpeed * dt; s.y = M.rideY;
+      if (!s.scanned && s.x >= M.sx) {
+        s.scanned = true; scanFlash = 1; s.glow = 1;
+        const dup = s.category === "Duplicates";
+        display = { text: dup ? "DUPLICATE  ▸  DUPLICATES" : `${(s.ext || "FILE").toUpperCase()}  ▸  ${s.category.toUpperCase()}`, color: dup ? "#ffc861" : "#7ee0ff", t: now };
+      }
+      if (s.x >= M.kx) { belt.splice(belt.indexOf(s), 1); kick(s); }
+    } else if (s.state === "fly") {
+      s.t += dt / s.dur; const e = ease(clamp(s.t)), F = s.fly;
+      s.x = bez(F.fx, F.cx, F.tx, e); s.y = bez(F.fy, F.cy, F.ty, e); s.rot = lerp(F.r0, F.r1, e) + Math.sin(e * Math.PI) * 1.2;
+      if (s.t >= 1) { flying--; land(s, F.b, { x: F.tx, y: F.ty, rot: F.r1 }); }
+    } else if (s.state === "home") {
+      s.t += dt / s.dur; const e = ease(clamp(s.t)), F = s.fly;
+      s.x = bez(F.fx, F.cx, F.tx, e); s.y = bez(F.fy, F.cy, F.ty, e); s.rot = lerp(F.r0, 0, e);
+      if (s.t >= 1) { flying--; s.state = "hopper"; s.bump = 1; }
+    }
+    if (s.bump) s.bump = Math.max(0, s.bump - dt * 4);
+    if (s.glow) s.glow = Math.max(0, s.glow - dt * 2.5);
+  }
+  for (const b of bins) { b.pulse = Math.max(0, b.pulse - dt * 4); b.shown += (b.count - b.shown) * Math.min(1, dt * 9); }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]; p.life -= dt * 2.2; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ---------- Drawing each frame ----------
+function render(now) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(layers.back, 0, 0);
+  ctx.setTransform(S, 0, 0, S, 0, 0);
+  const m = M, shake = !calm && (view.phase === "review" && beltSpeed > 200) ? Math.sin(now / 18) * .6 : 0;
+  // Bin contents, the last few dozen in each
+  for (const b of bins) {
+    const shown = b.members.slice(-30);
+    for (const s of shown) draw(s, s.x, s.y + (s.bump || 0) * -4, m.binDoc * (1 + (s.bump || 0) * .15), s.rot);
+  }
+  // Hopper inside: dark glass, then the pile
+  const win = hopperWindow(m);
+  ctx.save(); ctx.clip(win);
+  const inside = ctx.createLinearGradient(0, win.t, 0, win.b); inside.addColorStop(0, "#2a3747"); inside.addColorStop(1, "#4b5b70");
+  ctx.fillStyle = inside; ctx.fill(win);
+  pile.forEach((s, i) => {
+    if (s.state !== "hopper") return;
+    const spot = hopperSpot(i);
+    if (spot.hidden) return;
+    s.x = spot.x + shake; s.y = spot.y; s.rot = spot.rot;
+    draw(s, s.x, s.y - (s.bump || 0) * 6, m.doc * .62, s.rot);
+  });
+  const sheen = ctx.createLinearGradient(m.hx - win.wt / 2, win.t, m.hx + win.wt / 2, win.b);
+  sheen.addColorStop(0, "rgba(255,255,255,.35)"); sheen.addColorStop(.35, "rgba(255,255,255,.04)"); sheen.addColorStop(.5, "rgba(255,255,255,.18)"); sheen.addColorStop(.6, "rgba(255,255,255,0)");
+  ctx.fillStyle = sheen; ctx.fill(win); ctx.restore();
+  // Belt: the rubber top seen from slightly above, then its front edge, with moving cleats
+  const tt = m.beltTop - m.th, len = m.bx1 - m.bx0;
+  const topG = ctx.createLinearGradient(0, tt, 0, m.beltTop); topG.addColorStop(0, "#69717d"); topG.addColorStop(1, "#3d444e");
+  ctx.fillStyle = topG; ctx.beginPath(); ctx.roundRect(m.bx0, tt, len, m.th + 2, 3); ctx.fill();
+  const frontG = ctx.createLinearGradient(0, m.beltTop, 0, m.beltTop + m.bh * .5); frontG.addColorStop(0, "#2a2f37"); frontG.addColorStop(1, "#15181d");
+  ctx.fillStyle = frontG; ctx.fillRect(m.bx0, m.beltTop, len, m.bh * .5);
+  ctx.save(); ctx.beginPath(); ctx.rect(m.bx0, tt, len, m.th + m.bh * .5); ctx.clip();
+  const step = 26, off = beltPos % step;
+  for (let x = m.bx0 - step + off; x < m.bx1 + step; x += step) {
+    ctx.fillStyle = "rgba(255,255,255,.16)"; ctx.beginPath(); ctx.moveTo(x, tt); ctx.lineTo(x + 3, tt); ctx.lineTo(x + 6, m.beltTop); ctx.lineTo(x + 3, m.beltTop); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.fillRect(x + 4, m.beltTop, 2, m.bh * .5);
+  }
+  ctx.fillStyle = "rgba(255,255,255,.18)"; ctx.fillRect(m.bx0, tt, len, 1.2);
+  ctx.restore();
+  for (const x of [m.bx0, m.bx1]) {
+    const cy = (tt + m.beltTop + m.bh * .5) / 2, r = (m.th + m.bh * .5) / 2 + 2;
+    const gr = ctx.createRadialGradient(x - r * .3, cy - r * .3, 1, x, cy, r);
+    gr.addColorStop(0, "#fff"); gr.addColorStop(.6, "#b9c4d0"); gr.addColorStop(1, "#6d7a8a");
+    ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, cy, r, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "rgba(40,55,75,.6)"; ctx.lineWidth = 1.5;
+    for (let k = 0; k < 3; k++) { const a = beltPos / r + k * TAU / 3; ctx.beginPath(); ctx.moveTo(x, cy); ctx.lineTo(x + Math.cos(a) * r * .8, cy + Math.sin(a) * r * .8); ctx.stroke(); }
+    ctx.fillStyle = "#5d6979"; ctx.beginPath(); ctx.arc(x, cy, r * .22, 0, TAU); ctx.fill();
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(layers.front, 0, 0); ctx.setTransform(S, 0, 0, S, 0, 0);
+  // Bin counters
+  for (const b of bins) {
+    const l = b.lcd;
+    ctx.fillStyle = "#0b1622"; ctx.beginPath(); ctx.roundRect(l.x, l.y, l.w, l.h, 4); ctx.fill();
+    ctx.font = `700 ${l.h * .7}px ${MONO}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.shadowColor = "#4fd8ff"; ctx.shadowBlur = 6 + b.pulse * 10; ctx.fillStyle = b.count ? "#7ee0ff" : "#2c5468";
+    ctx.fillText(String(Math.round(b.shown)).padStart(3, "0"), l.x + l.w / 2, l.y + l.h / 2 + 1); ctx.shadowBlur = 0;
+    if (b.pulse > 0) { ctx.strokeStyle = `rgba(79,216,255,${b.pulse * .8})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(b.x - 2, b.y + b.h * .5 - 2, b.w + 4, b.h * .5 + 4, 12); ctx.stroke(); }
+  }
+  // Files on the belt, with a little blur at speed
+  const blur = clamp((beltSpeed - 300) / 1200) * .5;
+  for (const s of belt.concat([...sprites.values()].filter(s => s.state === "drop"))) {
+    if (blur > .02) draw(s, s.x - m.doc * .25, s.y, m.doc, 0, blur * .6);
+    draw(s, s.x, s.y, m.doc * (1 + (s.glow || 0) * .08), s.rot, 1, 0);
+    if (s.glow) { ctx.save(); ctx.globalAlpha = s.glow * .5; ctx.fillStyle = "#4fd8ff"; ctx.fillRect(s.x - m.doc * .5, s.y - m.doc * .5, m.doc, m.doc); ctx.restore(); }
+  }
+  scanner(now);
+  kicker();
+  cabinet(now);
+  for (const p of particles) { ctx.fillStyle = `rgba(200,215,235,${p.life * .7})`; ctx.beginPath(); ctx.arc(p.x, p.y, 2 + (1 - p.life) * 4, 0, TAU); ctx.fill(); }
+  for (const s of sprites.values()) {
+    if (s.state === "fly" || s.state === "home") draw(s, s.x, s.y, lerp(m.doc, m.binDoc, ease(clamp(s.t))) * (1 + Math.sin(clamp(s.t) * Math.PI) * .25), s.rot, 1, .8);
+    else if (s.state === "in-air" && s.g.t >= 0) draw(s, s.x, s.y, s.size, s.rot, s.a, .6);
+  }
+}
+function scanner(now) {
+  const m = M, d = m.disp, sw = m.doc * 2.3, sTop = m.beltTop - m.h * .24;
+  ctx.save(); ctx.beginPath(); ctx.roundRect(d.x, d.y, d.w, d.h, 5); ctx.clip();
+  const running = view.phase === "review" && (queue.length || belt.length || flying);
+  const txt = running ? display.text : view.phase === "review" ? "SORTED" : view.phase === "scanned" ? "READY" : view.phase === "applied" ? "DONE" : view.phase === "scanning" ? "LOADING" : "STANDBY";
+  let fs = Math.min(d.h * .5, 22); ctx.font = `700 ${fs}px ${MONO}`;
+  while (ctx.measureText(txt).width > d.w - 12 && fs > 7) { fs -= .5; ctx.font = `700 ${fs}px ${MONO}`; }
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const col = running ? display.color : "#7ee0ff";
+  ctx.shadowColor = col; ctx.shadowBlur = 12; ctx.fillStyle = col; ctx.fillText(txt, d.x + d.w / 2, d.y + d.h / 2 + 1); ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(255,255,255,.05)"; for (let y = d.y; y < d.y + d.h; y += 3) ctx.fillRect(d.x, y, d.w, 1);
+  const sheen = ctx.createLinearGradient(d.x, d.y, d.x + d.w * .6, d.y + d.h); sheen.addColorStop(0, "rgba(255,255,255,.12)"); sheen.addColorStop(.5, "rgba(255,255,255,0)");
+  ctx.fillStyle = sheen; ctx.fillRect(d.x, d.y, d.w, d.h);
+  ctx.restore();
+  const blink = Math.floor(now / 400) % 2 === 0;
+  [["#48d17a", running || blink], ["#ffcc4d", scanFlash > .3], ["#ff6b6b", false]].forEach(([c, lit], i) => {
+    const lx = d.right - 4 - i * 10, ly = d.lights;
+    ctx.fillStyle = lit ? c : "#5a6575"; ctx.shadowColor = c; ctx.shadowBlur = lit ? 9 : 0; ctx.beginPath(); ctx.arc(lx, ly, 3.2, 0, TAU); ctx.fill(); ctx.shadowBlur = 0;
+  });
+  // Laser fan from the housing down to the belt, and a sweeping red line
+  const top = sTop + 2, bot = m.beltTop - m.th, a = .1 + scanFlash * .5;
+  const fan = ctx.createLinearGradient(0, top, 0, bot); fan.addColorStop(0, `rgba(79,216,255,${a})`); fan.addColorStop(1, `rgba(79,216,255,${a * .25})`);
+  ctx.fillStyle = fan; ctx.beginPath(); ctx.moveTo(m.sx - 4, top); ctx.lineTo(m.sx + 4, top); ctx.lineTo(m.sx + sw * .45, bot); ctx.lineTo(m.sx - sw * .45, bot); ctx.closePath(); ctx.fill();
+  const ly = lerp(top + 8, bot - 2, (Math.sin(now / (running ? 90 : 220)) + 1) / 2);
+  ctx.strokeStyle = `rgba(255,60,85,${.6 + scanFlash * .4})`; ctx.shadowColor = "#ff4060"; ctx.shadowBlur = 12; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(m.sx - sw * .42, ly); ctx.lineTo(m.sx + sw * .42, ly); ctx.stroke(); ctx.shadowBlur = 0;
+  ctx.fillStyle = `rgba(255,60,85,${.5 + scanFlash * .5})`; ctx.beginPath(); ctx.ellipse(m.sx, bot, sw * .4, 2.5, 0, 0, TAU); ctx.fill();
+}
+function kicker() {
+  const m = M, k = m.kick, reach = m.rideY - m.doc * .55 - k.top, ext = calm ? 0 : Math.sin(kickT * Math.PI) * reach;
+  const rod = ctx.createLinearGradient(k.x - 3, 0, k.x + 3, 0); rod.addColorStop(0, "#8d99a8"); rod.addColorStop(.5, "#ffffff"); rod.addColorStop(1, "#8d99a8");
+  ctx.fillStyle = rod; ctx.fillRect(k.x - 3, k.top, 6, 6 + ext);
+  const pad = ctx.createLinearGradient(0, k.top + 6 + ext, 0, k.top + 14 + ext); pad.addColorStop(0, "#3b4450"); pad.addColorStop(1, "#15181d");
+  ctx.fillStyle = pad; ctx.beginPath(); ctx.roundRect(k.x - k.w * .7, k.top + 6 + ext, k.w * 1.4, 8, 3); ctx.fill();
+}
+function cabinet(now) {
+  const c = M.cab;
+  if (!c) return;
+  const s = c.scr, running = view.phase === "review" && (queue.length || belt.length || flying);
+  while (landTimes.length && now - landTimes[0] > 2000) landTimes.shift();
+  const perMin = Math.round(landTimes.length * 30), sorted = bins.reduce((n, b) => n + b.count, 0), total = sprites.size;
+  ctx.save(); ctx.beginPath(); ctx.roundRect(s.x, s.y, s.w, s.h, 4); ctx.clip();
+  ctx.fillStyle = "#08121c"; ctx.fillRect(s.x, s.y, s.w, s.h);
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; ctx.shadowColor = "#4fd8ff"; ctx.shadowBlur = 8;
+  const fs = Math.min(s.h * .13, 13);
+  ctx.font = `700 ${fs}px ${MONO}`; ctx.fillStyle = "#4f9fc0"; ctx.fillText("FILES / MIN", s.x + 10, s.y + fs + 8);
+  ctx.font = `700 ${Math.min(s.h * .34, 40)}px ${MONO}`; ctx.fillStyle = "#7ee0ff"; ctx.fillText(perMin.toLocaleString(), s.x + 10, s.y + fs + 8 + Math.min(s.h * .34, 40));
+  ctx.font = `700 ${fs}px ${MONO}`; ctx.fillStyle = "#4f9fc0";
+  ctx.fillText(`SORTED ${String(sorted).padStart(4, "0")} / ${String(total).padStart(4, "0")}`, s.x + 10, s.y + s.h - 10);
+  ctx.shadowBlur = 0;
+  const bw = s.w - 20, prog = total ? sorted / total : 0;
+  ctx.fillStyle = "#12324a"; ctx.fillRect(s.x + 10, s.y + s.h - 10 - fs - 10, bw, 5);
+  ctx.fillStyle = "#4fd8ff"; ctx.fillRect(s.x + 10, s.y + s.h - 10 - fs - 10, bw * prog, 5);
+  ctx.fillStyle = "rgba(255,255,255,.04)"; for (let y = s.y; y < s.y + s.h; y += 3) ctx.fillRect(s.x, y, s.w, 1);
+  ctx.restore();
+  const g = c.gauge, a = Math.PI * (.75 + clamp(beltSpeed / 2600) * 1.5) + (running ? Math.sin(now / 40) * .01 : 0);
+  ctx.strokeStyle = "#e5484d"; ctx.lineWidth = 2.5; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(g.x, g.y); ctx.lineTo(g.x + Math.cos(a) * g.r * .78, g.y + Math.sin(a) * g.r * .78); ctx.stroke();
+  ctx.fillStyle = "#1d2939"; ctx.beginPath(); ctx.arc(g.x, g.y, 4, 0, TAU); ctx.fill();
+  const l = c.lamp, lit = running || Math.floor(now / 600) % 2 === 0;
+  ctx.fillStyle = lit ? "#48d17a" : "#2e4a3a"; ctx.shadowColor = "#48d17a"; ctx.shadowBlur = lit ? 12 : 0;
+  ctx.beginPath(); ctx.arc(l.x, l.y, l.r, 0, TAU); ctx.fill(); ctx.shadowBlur = 0;
+}
+
+// ---------- Counters ----------
+const shownStat = {};
+function roll(id, target, dt) {
+  const el = $(id), cur = shownStat[id] ?? 0;
+  const next = Math.abs(target - cur) < .5 ? target : cur + (target - cur) * Math.min(1, dt * 7);
+  shownStat[id] = next;
+  const txt = Math.round(next).toLocaleString();
+  if (el.textContent !== txt) {
+    el.textContent = txt;
+    if (!calm) { el.classList.add("bump"); clearTimeout(el.bumpT); el.bumpT = setTimeout(() => el.classList.remove("bump"), 140); }
+  }
+}
+function counters(dt) {
+  let found = 0; const types = new Set();
+  for (const s of sprites.values()) if (s.arrived || ["drop", "belt", "fly", "bin"].includes(s.state)) { found++; types.add(s.ext); }
+  roll("sTotal", found, dt);
+  roll("sFrom", sprites.size ? (view.sources || []).length : 0, dt);
+  roll("sTypes", types.size, dt);
+  roll("sFolders", bins.filter(b => b.count > 0).length, dt);
+  roll("sDups", binOf("Duplicates")?.count || 0, dt);
+}
+
+// ---------- Sound: off until switched on ----------
+let audio, soundOn = false;
+$("soundBtn").onclick = () => {
+  soundOn = !soundOn; audio ||= new AudioContext(); audio.resume();
+  $("soundBtn").textContent = soundOn ? "♪ Sound on" : "♪ Sound off";
+  $("soundBtn").setAttribute("aria-pressed", soundOn);
+};
+const NOTES = [523.25, 587.33, 659.25, 783.99, 880, 987.77, 1046.5, 1174.66];
+let lastTick = 0;
+function tick(b) {
+  if (!soundOn || performance.now() - lastTick < 30) return;
+  lastTick = performance.now();
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = "sine"; o.frequency.value = NOTES[bins.indexOf(b) % NOTES.length];
+  g.gain.setValueAtTime(.0001, audio.currentTime); g.gain.exponentialRampToValueAtTime(.04, audio.currentTime + .01);
+  g.gain.exponentialRampToValueAtTime(.0001, audio.currentTime + .2);
+  o.connect(g).connect(audio.destination); o.start(); o.stop(audio.currentTime + .22);
+}
+let lastClack = 0;
+function clack() {
+  if (!soundOn || performance.now() - lastClack < 45) return;
+  lastClack = performance.now();
+  const len = audio.sampleRate * .04, buf = audio.createBuffer(1, len, audio.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+  const src = audio.createBufferSource(), f = audio.createBiquadFilter(), g = audio.createGain();
+  f.type = "bandpass"; f.frequency.value = 1800; g.gain.value = .12;
+  src.buffer = buf; src.connect(f).connect(g).connect(audio.destination); src.start();
+}
+
+// ---------- Words and buttons. Everything from the server goes in as text, never as markup. ----------
+const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+const lastPart = p => (p || "").replace(/\/+$/, "").split("/").pop();
+function headline(before, word, after) {
+  const h = $("headline"), key = before + word + after;
+  if (h.dataset.key === key) return;
+  h.dataset.key = key; h.textContent = "";
+  const em = document.createElement("em"); em.textContent = word;
+  h.append(before, em, after);
+}
+const setText = (id, t) => { if ($(id).textContent !== t) $(id).textContent = t; };
+
+function ui() {
+  const v = view, phase = v.phase, moving = queue.length > 0 || belt.length > 0 || flying > 0;
+  const show = { start: phase === "start", sort: false, apply: false, undo: false, again: false };
+  const sweep = v.mode === "sweep", place = sweep ? "whole Mac" : lastPart(v.folder) || "messy";
+  const destName = lastPart(v.dest) || "", total = (v.names || []).length;
+  let say = "", note = "", bad = false, status = "Ready", live = false;
+  if (sweep) headline("Tidying my ", "whole Mac", ""); else headline("Sorting my ", place, " folder");
+  if (phase === "start") {
+    headline("Sort a ", "messy", " computer");
+    if (v.pending_undo) { say = `Up to ${plural(v.pending_undo, "file")} sorted into ${lastPart(v.dest_choice)} earlier can go back.`; show.undo = true; }
+  }
+  if (phase === "scanning") { say = `Loading the hopper: ${v.previewed.toLocaleString()} of ${total.toLocaleString()}...`; status = "Loading"; live = true; }
+  if (phase === "empty") {
+    show.again = true;
+    say = sweep ? "No loose files at the top of your folders." : "No loose files at the top of this folder.";
+    note = "Subfolders aren't opened.";
+    if (v.pending_undo) { show.undo = true; note += `\nA last run can be put back: up to ${plural(v.pending_undo, "file")}.`; }
+  }
+  if (phase === "scanned") {
+    say = `${plural(total, "file")} in the hopper${sweep ? ` from ${plural(v.sources.length, "folder")}` : ""}. Nothing has moved yet.`;
+    status = "Ready to sort"; show.sort = show.again = true;
+    const extra = [];
+    if (v.left_out) extra.push(`${v.left_out.toLocaleString()} left out by the ${total.toLocaleString()}-file limit.`);
+    if (sweep) extra.push(`From ${v.sources.map(lastPart).join(", ")}. Only loose files at the top; subfolders stay as they are.`);
+    for (const f of v.left_folders || []) extra.push(`${f.name} left out: ${f.reason}`);
+    extra.push(`Sorted on this Mac by file type, into folders in ${destName}. Nothing is sent anywhere.`);
+    note = extra.join("\n");
+    if (v.pending_undo) { show.undo = true; note += `\nA last run into ${destName} can be put back: up to ${plural(v.pending_undo, "file")}.`; }
+  }
+  const done = bins.reduce((n, b) => n + b.count, 0);
+  if (phase === "review" && moving) { say = `Sorting ${done.toLocaleString()} of ${total.toLocaleString()}...`; status = "Machine running"; live = true; }
+  if (phase === "review" && !moving) {
+    say = "Sorted. Nothing has moved yet."; note = `Tap a bin to look inside. The folders will be made in ${destName}.`;
+    status = "Sorted · not moved yet"; show.apply = show.again = true;
+  }
+  if (phase === "applied") {
+    if (sweep) headline("Tidied my ", "whole Mac", ""); else headline("Sorted my ", place, " folder");
+    say = `Done. ${plural(v.moved, "file")} moved.`; status = "Done";
+    note = `Now in folders inside ${destName}.${v.left_out ? ` ${v.left_out.toLocaleString()} not touched.` : ""}`;
+    show.undo = show.again = true;
+  }
+  if (phase === "stopped") {
+    say = `Stopped after ${plural(v.moved, "file")}.`; bad = true; status = "Stopped";
+    note = `${v.failed} couldn't be moved: ${v.reason}`; show.undo = show.again = true;
+  }
+  if (phase === "undone") {
+    headline("Back to the ", "mess", "");
+    say = `${plural(v.restored, "file")} back where they were.`; status = "Put back";
+    note = v.left.map(x => `${x.name}: ${x.reason}`).join("\n"); show.again = true; show.undo = v.pending_undo > 0;
+  }
+  if (phase === "problem") { say = v.message; bad = true; show.again = true; status = "Problem"; }
+  if (startError) { say = startError; bad = true; }
+  $("start").hidden = !show.start;
+  for (const key of ["sort", "apply", "undo", "again"]) $(key).hidden = !show[key];
+  if (phase !== "review" && !$("confirm").hidden) closeConfirm();
+  if (phase === "problem" && filming()) film(false);
+  setText("destName", v.dest_choice ? lastPart(v.dest_choice) : "the same folder");
+  $("destName").title = v.dest_choice || "";
+  $("destClear").hidden = !v.dest_choice;
+  const finished = phase === "applied", reviewed = phase === "review" && !moving;
+  const used = bins.filter(b => b.count > 0).length;
+  $("total").classList.toggle("on", (finished || reviewed) && $("confirm").hidden);
+  setText("totalN", finished ? v.moved.toLocaleString() : reviewed ? done.toLocaleString() : "");
+  setText("totalWords", finished ? (v.moved === 1 ? "file moved into folders" : "files moved into folders") : reviewed ? `sorted into ${plural(used, "bin")} · nothing moved yet` : "");
+  setText("say", say); setText("note", note); setText("statusText", status);
+  $("status").classList.toggle("live", live); $("say").classList.toggle("bad", bad);
+  canvas.style.cursor = (phase === "review" || phase === "applied") && !moving ? "pointer" : "default";
+}
+
+// ---------- Talking to the engine ----------
+let startError = "", misses = 0, returned = false, runStart = 0;
+function reconcile(st) {
+  $("film").hidden = !st.film;  // recording only (--film)
+  const newRun = (st.sources || []).join("\n") !== (view.sources || []).join("\n");
+  if (st.phase === "start" || (st.phase === "scanning" && view.phase !== "scanning") || newRun) {
+    if (view.phase !== st.phase || newRun) clearStage();
+  }
+  const foldersChanged = view.folders.join("\n") !== st.folders.join("\n");
+  view = st;
+  $("title").textContent = st.title;
+  if (document.title !== st.title) document.title = st.title;
+  if (foldersChanged) layout();
+  if (["scanning", "scanned", "review", "applied", "stopped"].includes(st.phase)) ensureSprites(st);
+  if (st.phase === "review") {
+    const ids = Object.keys(st.results).map(Number).filter(id => !seen.has(id));
+    if (ids.length) {
+      if (!queue.length && !belt.length) runStart = performance.now();
+      // The pile empties from the top, so the level drops as the machine runs.
+      for (const s of pile.slice().reverse()) if (ids.includes(s.id) && !seen.has(s.id)) { seen.add(s.id); queue.push(s); }
+      for (const id of ids) if (!seen.has(id) && sprites.has(id)) { seen.add(id); queue.push(sprites.get(id)); }
+    }
+  }
+  if (st.phase === "undone" && !returned) { returned = true; flyHome(); }
+}
+function flyHome() {
+  for (const b of bins) {
+    const recent = new Set(b.members.slice(-30));
+    for (const s of b.members) {
+      s.hopSlot = pile.length; pile.push(s);
+      if (calm || !recent.has(s)) { s.state = "hopper"; continue; }
+      const mx = M.hx, my = M.hTop - M.doc * .2;
+      s.fly = { fx: s.x, fy: s.y, tx: mx, ty: my, cx: (s.x + mx) / 2, cy: Math.min(s.y, my) - M.h * .15, r0: s.rot };
+      s.state = "home"; s.t = -rnd(0, .6); s.dur = rnd(.8, 1.2); flying++;
+    }
+    b.members = []; b.count = 0; b.inbound = 0;
+  }
+}
+function clearStage() {
+  for (const s of sprites.values()) if (s.loaded) URL.revokeObjectURL(s.url);
+  sprites.clear(); pile = []; queue = []; seen = new Set(); flying = 0; belt = []; loadedKey = ""; returned = false;
+  for (const b of bins) { b.count = 0; b.shown = 0; b.members = []; b.inbound = 0; }
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { headers: { "X-Token": token } });
+    misses = 0;
+    if (r.ok) reconcile(await r.json());
+    else if (r.status === 403) startError = "Open this page from the link the app printed.";
+  } catch { if (++misses > 8) startError = "The app has stopped. Start it again."; }
+  setTimeout(poll, 250);
+}
+async function act(path, body) {
+  const r = await post(path, body);
+  if (!r.ok) { const info = await r.json().catch(() => ({})); startError = info.error || "That didn't work."; }
+  else startError = "";
+  return r.ok;
+}
+async function pickDest() {
+  const r = await post("/api/pick", { path: "dest" });
+  const { path } = r.ok ? await r.json() : {};
+  return path ? act("/api/dest", { path }) : false;
+}
+$("pick").onclick = async () => {
+  const r = await post("/api/pick");
+  const { path } = r.ok ? await r.json() : {};
+  if (path) act("/api/scan", { path });
+};
+$("sweep").onclick = async () => { if (view.dest_choice || await pickDest()) act("/api/sweep"); };
+$("destPick").onclick = pickDest;
+$("destClear").onclick = () => act("/api/dest", { path: "" });
+$("typed").onsubmit = e => { e.preventDefault(); const path = $("path").value.trim(); if (path) act("/api/scan", { path }); };
+$("sort").onclick = () => act("/api/sort");
+$("apply").onclick = openConfirm;
+$("undo").onclick = () => act("/api/undo");
+$("again").onclick = async () => { if (await act("/api/reset")) clearStage(); };
+
+// The confirm step: nothing moves until the destination shown here is sent back.
+let confirmAt = 0, confirmedDest = null;
+function openConfirm() {
+  confirmedDest = view.dest;  // send exactly the folder this card shows
+  const n = Object.keys(view.results).length, k = (view.sources || []).length;
+  $("confirmTitle").textContent = `Move ${plural(n, "file")} into ${lastPart(view.dest)}?`;
+  $("confirmFrom").textContent = `From ${plural(k, "folder")}: ${(view.sources || []).map(lastPart).join(", ")}. Into new folders inside:`;
+  $("confirmDest").textContent = confirmedDest || "";
+  $("confirm").hidden = $("scrim").hidden = false; confirmAt = performance.now();
+  $("confirm").focus();  // the card, not a button: Space then means "yes", Tab reaches either button
+}
+function closeConfirm() { $("confirm").hidden = true; $("scrim").hidden = $("peek").hidden; }
+$("yes").onclick = () => { const dest = confirmedDest; closeConfirm(); act("/api/apply", { path: dest }); };
+$("no").onclick = closeConfirm;
+
+// Film mode
+let hintTimer;
+function film(on) {
+  document.body.classList.toggle("film", on);
+  $("hint").classList.toggle("on", on);
+  clearTimeout(hintTimer);
+  if (on) hintTimer = setTimeout(() => $("hint").classList.remove("on"), 3000);
+  if (on) document.documentElement.requestFullscreen?.().catch(() => {});
+  if (on && view.phase === "scanned") setTimeout(regather, 350);  // replay the opening for the camera
+  else if (!on && document.fullscreenElement) document.exitFullscreen();
+}
+$("film").onclick = () => film(true);
+addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if ((e.key === "f" || e.key === "F") && view.film) film(!filming());  // recording only (--film)
+  if (e.key === "Escape") { film(false); closePeek(); closeConfirm(); }
+  if ((e.key === "g" || e.key === "G") && view.phase === "scanned") regather();
+  // A focused control keeps Space for itself, so "Not yet" can never be turned into "Yes".
+  const el = document.activeElement;
+  if (el && el !== document.body && el !== $("confirm") && el.matches("button, input, textarea, select, a[href], [tabindex]")) return;
+  if (e.key === " " && !e.repeat && $("peek").hidden) {
+    e.preventDefault();
+    if (!$("confirm").hidden) { if (performance.now() - confirmAt > 600) $("yes").click(); return; }
+    const next = ["sort", "apply"].find(k => !$(k).hidden);
+    if (next) $(next).click();
+  }
+});
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) film(false); setTimeout(resize, 50); });
+
+// A mouse click shouldn't leave a button focused, or the next Space would press it again.
+document.addEventListener("click", e => { if (e.detail > 0) e.target.closest?.("button")?.blur(); });
+
+// Looking inside a bin
+canvas.addEventListener("click", e => {
+  if (!["review", "applied"].includes(view.phase) || queue.length || belt.length || flying) return;
+  const b = bins.find(b => e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h);
+  if (b && b.count) peek(b);
+});
+function peek(b) {
+  $("peekTitle").textContent = `${b.name} · ${b.count.toLocaleString()}`;
+  const grid = $("peekGrid"); grid.textContent = "";
+  for (const s of b.members) {
+    const fig = document.createElement("figure"), cap = document.createElement("figcaption"), img = document.createElement("img");
+    img.src = s.url; img.alt = "";
+    cap.textContent = cap.title = s.name;
+    fig.append(img, cap); grid.append(fig);
+  }
+  $("peek").hidden = $("scrim").hidden = false;
+}
+function closePeek() { $("peek").hidden = true; $("scrim").hidden = $("confirm").hidden; }
+$("closePeek").onclick = closePeek;
+$("scrim").onclick = () => { closePeek(); closeConfirm(); };
+
+// After a resize, put settled files back on their spots.
+function positionStuck() {
+  for (const b of bins) b.members.forEach((s, k) => { const p = binSpot(b, k); s.x = p.x; s.y = p.y; s.rot = p.rot; });
+}
+
+let lastFrame = performance.now();
+function frame(now) {
+  const dt = Math.min(now - lastFrame, 50) / 1000; lastFrame = now;
+  if (wantDpr() !== S) resize();
+  if (M) { update(dt, now); render(now); }
+  counters(dt);
+  ui();
+  requestAnimationFrame(frame);
+}
+resize();
+poll();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

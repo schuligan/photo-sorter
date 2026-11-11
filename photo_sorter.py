@@ -1,4 +1,10 @@
-"""Photo Sorter: the first tool on the shared engine."""
+"""Photo Sorter: the first tool on the shared engine.
+
+    python3 photo_sorter.py                      # the whole-computer button reads your own folders
+    python3 photo_sorter.py --home "<folder>"    # point it at a fake home folder for testing
+"""
+import argparse
+
 import engine
 
 TOOL = engine.Tool(
@@ -11,4 +17,6 @@ TOOL = engine.Tool(
 )
 
 if __name__ == "__main__":
-    engine.serve(TOOL)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--home", help="a fake home folder for testing the whole-computer button")
+    engine.serve(TOOL, home=ap.parse_args().home)

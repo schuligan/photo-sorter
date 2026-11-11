@@ -104,6 +104,19 @@ h1 em { font-family: var(--serif); font-style: italic; font-weight: 500; letter-
 #start strong { font: italic 500 26px/1.1 var(--serif); }
 #start p { margin: 0; color: var(--muted); max-width: 320px; }
 #typed { display: flex; gap: 6px; width: min(380px, 80vw); }
+.two { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.btn.globe { display: inline-flex; align-items: center; gap: 9px; font-size: 16px; padding: 13px 24px; }
+.btn.globe::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--rose); box-shadow: 0 0 10px rgba(31,111,214,.6); }
+.dest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; font-size: 13px; color: var(--muted);
+  padding: 8px 12px; border-radius: 16px; background: rgba(255,255,255,.6); border: 1px solid var(--line); }
+.dest b { color: var(--ink); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link { font: inherit; font-size: 13px; font-weight: 650; color: var(--rose); background: none; border: 0; padding: 2px 4px; cursor: pointer; }
+#confirm { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 20; width: min(520px, 92vw); text-align: center;
+  display: flex; flex-direction: column; gap: 12px; align-items: center; border-radius: 28px; padding: 22px 24px;
+  background: rgba(255,255,255,.92); border: 1px solid var(--line); box-shadow: 0 40px 80px -30px rgba(30,60,110,.5); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+#confirm h3 { margin: 0; font: italic 500 30px/1.15 var(--serif); }
+#confirm p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+#confirm code { font: 600 13px ui-monospace, Menlo, monospace; color: var(--ink); background: #eef4fb; padding: 6px 10px; border-radius: 10px; max-width: 100%; overflow-wrap: anywhere; }
 #path { flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 9px 14px; border-radius: 999px; color: var(--ink);
   border: 1px solid var(--line); background: var(--glass); backdrop-filter: blur(10px); outline: none; }
 #total { position: relative; z-index: 6; text-align: center; display: none; padding: 26px 40px; border-radius: 34px;
@@ -211,10 +224,15 @@ body.film { cursor: none; }
   <section id="ball" aria-label="Your files">
     <div id="ballInner">
       <div id="start">
-        <strong>Pick a folder to tidy</strong>
-        <button id="pick" class="btn main" type="button">Choose folder</button>
+        <strong>Sort my photos</strong>
+        <div class="two">
+          <button id="pick" class="btn main" type="button">Pick a folder to tidy</button>
+          <button id="sweep" class="btn globe" type="button">Find photos all over my computer</button>
+        </div>
         <form id="typed"><input id="path" placeholder="or paste a folder path" aria-label="Folder path" autocomplete="off" spellcheck="false"><button class="btn small" type="submit">Load</button></form>
-        <p>Nothing moves until you say so. One click puts it all back.</p>
+        <div class="dest"><span>Sorted photos go to</span><b id="destName">the same folder</b>
+          <button class="link" id="destPick" type="button">Choose…</button><button class="link" id="destClear" type="button" hidden>Use the same folder</button></div>
+        <p>All over my computer means loose photos and videos at the top of Desktop, Downloads, Documents, Pictures, Movies and Music. Never your Photos library. Nothing moves until you say so. One click puts it all back.</p>
       </div>
       <div id="total"><b id="totalN">0</b><span id="totalWords">files sorted</span></div>
       <div id="count" aria-live="polite"></div>
@@ -237,6 +255,13 @@ body.film { cursor: none; }
 </div>
 <div id="hint">Space: next step · G: gather again · Esc: leave</div>
 <div id="scrim" hidden></div>
+<section id="confirm" hidden tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+  <h3 id="confirmTitle"></h3>
+  <p id="confirmFrom"></p>
+  <code id="confirmDest"></code>
+  <p>Nothing is deleted or overwritten. One click puts it all back.</p>
+  <div class="two"><button id="yes" class="btn main" type="button">Yes, move them</button><button id="no" class="btn" type="button">Not yet</button></div>
+</section>
 <section id="peek" hidden aria-label="Folder contents">
   <header><h3 id="peekTitle"></h3><button id="closePeek" class="btn small" type="button">Close</button></header>
   <div class="grid" id="peekGrid"></div>
@@ -399,7 +424,7 @@ function regather() {
 }
 
 async function loadThumbs(st) {
-  const key = st.folder + st.names.length;
+  const key = (st.sources || []).join("\n") + st.names.length;
   if (loaded === key) return;
   loaded = key;
   const ids = [...st.thumbs];
@@ -671,6 +696,7 @@ function music(busy) {
 }
 
 // Words and buttons. Everything from the server goes in as text, never as markup.
+const lastPart = p => (p || "").replace(/\/+$/, "").split("/").pop();
 function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
 function headline(before, word, after) {
   const h = $("headline"), key = before + word + after;
@@ -684,11 +710,14 @@ function setText(id, t) { if ($(id).textContent !== t) $(id).textContent = t; }
 function ui() {
   const v = view, busyFlying = queue.length > 0 || flying > 0, phase = v.phase;
   const show = { start: phase === "start", sort: false, apply: false, undo: false, again: false, retry: false };
-  const place = (v.folder || "").replace(/\/+$/, "").split("/").pop() || "messy";
+  const sweep = v.mode === "sweep", place = sweep ? "whole Mac" : lastPart(v.folder) || "messy", destName = lastPart(v.dest);
   let say = "", note = "", bad = false, status = "Ready", live = false, caption = "";
   const total = (v.names || []).length;
-  headline("Sorting my ", place, " folder");
-  if (phase === "start") { headline("Sort a ", "messy", " folder"); caption = "your mess goes here"; }
+  if (sweep) headline("Sorting my ", "whole Mac", ""); else headline("Sorting my ", place, " folder");
+  if (phase === "start") {
+    headline("Sort a ", "messy", " folder"); caption = "your mess goes here";
+    if (v.pending_undo) { say = `Up to ${plural(v.pending_undo, "file")} sorted into ${lastPart(v.dest_choice)} earlier can go back.`; show.undo = true; }
+  }
   if (phase === "scanning") { say = `Looking through ${place}: ${v.previewed} of ${total}...`; status = `Reading ${v.previewed} of ${total}`; live = true; caption = "gathering the mess"; }
   if (phase === "empty") {
     show.again = true;
@@ -701,6 +730,9 @@ function ui() {
     show.again = true;
     const extra = [];
     if (v.left_out) extra.push(`${v.left_out} left out by the ${total}-file limit.`);
+    if (sweep) extra.push(`From ${v.sources.map(lastPart).join(", ")}, loose files only.`);
+    for (const f of v.left_folders || []) extra.push(`${f.name} left out: ${f.reason}`);
+    if (destName && v.dest !== v.sources[0]) extra.push(`Sorted folders go in ${destName}.`);
     if (v.skipped.length) extra.push(`${v.skipped.length} couldn't be previewed and will stay where they are.`);
     extra.push("Small copies of these photos go to Anthropic through Claude to be sorted.");
     note = extra.join(" ");
@@ -717,10 +749,10 @@ function ui() {
     show.apply = show.again = true;
   }
   if (phase === "applied") {
-    headline("Sorted my ", place, " folder");
+    if (sweep) headline("Sorted my ", "whole Mac", ""); else headline("Sorted my ", place, " folder");
     say = `Done. ${plural(v.moved, "file")} sorted.`; status = "Done";
     const untouched = v.skipped.length + v.left_out;
-    note = `Now in folders inside ${place}.${untouched ? ` ${untouched} not touched.` : ""}`;
+    note = `Now in folders inside ${destName}.${untouched ? ` ${untouched} not touched.` : ""}`;
     show.undo = show.again = true;
   }
   if (phase === "stopped") {
@@ -737,6 +769,10 @@ function ui() {
   if (startError) { say = startError; bad = true; }
   $("start").hidden = !show.start;
   for (const key of ["sort", "apply", "undo", "again", "retry"]) $(key).hidden = !show[key];
+  if (phase !== "review" && !$("confirm").hidden) closeConfirm();
+  setText("destName", v.dest_choice ? lastPart(v.dest_choice) : "the same folder");
+  $("destName").title = v.dest_choice || "";
+  $("destClear").hidden = !v.dest_choice;
   if (phase === "problem" && filming()) film(false);
   const finished = phase === "applied", reviewed = phase === "review" && !busyFlying;
   const used = folders.filter(f => f.count > 0).length, sorted = folders.reduce((n, f) => n + f.count, 0);
@@ -754,15 +790,16 @@ function ui() {
 // Talking to the engine
 let startError = "", misses = 0;
 function reconcile(st) {
-  const fresh = st.phase === "scanning" || st.phase === "start" || st.folder !== view.folder;
-  if (fresh && (view.phase !== st.phase || st.folder !== view.folder)) clearStage();
+  const key = (st.sources || []).join("\n"), same = key === (view.sources || []).join("\n");
+  const fresh = st.phase === "scanning" || st.phase === "start" || !same;
+  if (fresh && (view.phase !== st.phase || !same)) clearStage();
   view = st;
   videoSet = new Set(st.videos || []);
   $("title").textContent = st.title;
   if (document.title !== st.title) document.title = st.title;
   setFolders(st.folders);
   if (["scanned", "sorting", "review"].includes(st.phase)) loadThumbs(st);
-  if (!booted) { booted = true; if (st.phase === "scanned") countdown(true); }  // opened on a ready folder
+  if (!booted) { booted = true; if (st.phase === "scanned" && st.film) countdown(true); }  // recording only: opened on a ready folder
   const ids = Object.keys(st.results).map(Number).sort((a, b) =>
     (st.duplicates[b] !== undefined) - (st.duplicates[a] !== undefined));
   for (const id of ids) if (!seen.has(id) && sprites.has(id)) { seen.add(id); queue.push(id); }
@@ -821,7 +858,31 @@ $("pick").onclick = async () => {
 // Leave the path box once a folder loads, so the next Space runs Sort instead of typing a space.
 $("typed").onsubmit = async e => { e.preventDefault(); const path = $("path").value.trim(); if (path) { gatherOnLoad = true; if (await act("/api/scan", { path })) $("path").blur(); } };
 $("sort").onclick = () => act("/api/sort");
-$("apply").onclick = () => act("/api/apply");
+$("apply").onclick = () => {
+  // Leaving the folder the photos were found in needs a clear yes; sorting inside one folder works as before.
+  if (view.mode === "sweep" || view.dest !== view.sources[0]) openConfirm(); else act("/api/apply");  // the server still checks
+};
+async function pickDest() {
+  const r = await post("/api/pick", { path: "dest" });
+  const { path } = r.ok ? await r.json() : {};
+  return path ? act("/api/dest", { path }) : false;
+}
+$("sweep").onclick = async () => { if (view.dest_choice || await pickDest()) act("/api/sweep"); };
+$("destPick").onclick = pickDest;
+$("destClear").onclick = () => act("/api/dest", { path: "" });
+let confirmAt = 0, confirmedDest = null;
+function openConfirm() {
+  confirmedDest = view.dest;  // send exactly the folder this card shows
+  const n = Object.keys(view.results).length, k = view.sources.length;
+  $("confirmTitle").textContent = `Move ${plural(n, "file")} into ${lastPart(confirmedDest)}?`;
+  $("confirmFrom").textContent = `From ${plural(k, "folder")}: ${view.sources.map(lastPart).join(", ")}. Into new folders inside:`;
+  $("confirmDest").textContent = confirmedDest;
+  $("confirm").hidden = $("scrim").hidden = false; confirmAt = performance.now();
+  $("confirm").focus();  // the card, not a button: Space then means "yes", Tab reaches either button
+}
+function closeConfirm() { $("confirm").hidden = true; $("scrim").hidden = $("peek").hidden; }
+$("yes").onclick = () => { const dest = confirmedDest; closeConfirm(); act("/api/apply", { path: dest }); };
+$("no").onclick = closeConfirm;
 $("undo").onclick = () => act("/api/undo");
 $("again").onclick = async () => { if (await act("/api/reset")) clearStage(); };
 $("retry").onclick = () => { clearStage(); gatherOnLoad = true; act("/api/scan", { path: view.folder }); };
@@ -864,13 +925,18 @@ function film(on) {
 }
 addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT") return;
-  if (e.key === "f" || e.key === "F") film(!filming());
-  if (e.key === "Escape") { film(false); closePeek(); }
-  if ((e.key === "g" || e.key === "G") && view.phase === "scanned") regather();
+  if ((e.key === "f" || e.key === "F") && view.film) film(!filming());  // recording only (--film)
+  if (e.key === "Escape") { film(false); closePeek(); closeConfirm(); }
+  if ((e.key === "g" || e.key === "G") && view.film && view.phase === "scanned") regather();
   // One key runs the next step, with or without film mode: Sort, then Apply.
   // A focused control keeps Space for itself, so it can never be turned into Apply.
   const el = document.activeElement;
-  if (el && el !== document.body && el.matches("button, input, textarea, select, a[href], [tabindex]")) return;
+  if (el && el !== document.body && el !== $("confirm") && el.matches("button, input, textarea, select, a[href], [tabindex]")) return;
+  if (e.key === " " && !e.repeat && !$("confirm").hidden) {
+    e.preventDefault();
+    if (performance.now() - confirmAt > 600) $("yes").click();  // a second, deliberate press
+    return;
+  }
   if (e.key === " " && !e.repeat && $("peek").hidden && !counting) {
     e.preventDefault();
     const next = ["sort", "apply"].find(k => !$(k).hidden);
@@ -894,7 +960,7 @@ function peek(f) {
 }
 function closePeek() { $("peek").hidden = $("scrim").hidden = true; }
 $("closePeek").onclick = closePeek;
-$("scrim").onclick = closePeek;
+$("scrim").onclick = () => { closePeek(); closeConfirm(); };
 
 resize();
 poll();

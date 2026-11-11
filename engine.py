@@ -1,7 +1,7 @@
 """Shared engine: scan a folder, sort it, move files safely, undo.
 
 A tool supplies only a Tool definition. Standard library only. Mac only.
-Rules that must hold: never delete or overwrite a file, never move outside the chosen folder,
+Rules that must hold: never delete or overwrite a file, every move can be undone,
 Claude gets no tools, and only metadata-free thumbnails leave the Mac. test_engine.py checks them.
 """
 import base64
@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,8 +37,14 @@ PAGE = Path(__file__).resolve().parent / "page.html"
 SIPS = "sips"
 FFMPEG = "ffmpeg"
 CLAUDE = "claude"
-# One folder per running copy, so two copies of the app never mix up their thumbnails.
+QLMANAGE = "qlmanage"
+PREVIEW_SIZE = 320
+PREVIEW_BATCH = 40
+PREVIEW_TIMEOUT = 60  # seconds for one batch
+PREVIEW_QUIET = 3  # seconds with no new picture before qlmanage is stopped
+# One set of folders per running copy, so two copies of the app never mix up their pictures.
 THUMBS = Path(tempfile.gettempdir()) / f"organizer-thumbs-{os.getpid()}"
+PREVIEWS = Path(tempfile.gettempdir()) / f"organizer-previews-{os.getpid()}"  # File Sorter's own, so it never touches Photo Sorter's
 EMPTY = Path(tempfile.gettempdir()) / f"organizer-empty-{os.getpid()}"
 THUMB_SIZE = 256
 THUMB_TIMEOUT = 30
@@ -56,6 +63,11 @@ _SYSTEM = ("/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/private/etc
            "/Applications", "/opt", "/dev", "/cores")
 _PACKAGES = (".photoslibrary", ".photolibrary", ".aplibrary", ".migratedphotolibrary", ".lrdata", ".app", ".bundle", ".framework", ".plugin", ".kext",
              ".pkg", ".fcpbundle", ".imovielibrary", ".tvlibrary", ".musiclibrary")
+# The whole-computer sweep reads the top of these folders in the home folder, nothing else.
+SWEEP = ("Desktop", "Downloads", "Documents", "Pictures", "Movies", "Music")
+# Files a browser is still writing.
+_PARTIAL = (".crdownload", ".download", ".part", ".partial", ".opdownload")
+SF_DATALESS = 0x40000000  # an iCloud file whose contents aren't on this Mac, from <sys/stat.h>
 
 
 class Refused(Exception):
@@ -81,10 +93,23 @@ class Tool:
     videos: tuple
     categories: tuple
     instructions: str
+    # name -> category. When set, every file type is sorted on this Mac by its name and Claude is never called.
+    classify: object = None
+    page: str = "page.html"
 
     @property
     def folders(self):
         return (*self.categories, DUPLICATES)
+
+    def wants(self, name):
+        ext = os.path.splitext(name)[1].lower()
+        if self.classify:
+            return _is_bare(name) and not name.startswith(".") and ext not in _PARTIAL
+        return ext in (*self.images, *self.videos)
+
+    def category(self, name):
+        found = self.classify(name)
+        return found if found in self.categories else self.categories[-1]
 
 
 @dataclass
@@ -95,6 +120,7 @@ class Item:
     mtime_ns: int
     is_video: bool = False
     category: str = None
+    src: int = 0  # which scanned folder it is in
 
 
 @dataclass
@@ -154,6 +180,40 @@ def check_folder(path):
     return real
 
 
+def check_source(path, tool):
+    """A folder whose files may move, or Refused. Code projects are left alone."""
+    real = check_folder(path)
+    if os.path.lexists(real / ".git"):
+        raise Refused("That looks like a code project, so it's left alone.")
+    return real
+
+
+def sweep_folders(home, tool, dest):
+    """([folders to read], [(folder name, why it was left out)]) for the whole-computer button."""
+    found, left = [], []
+    for name in SWEEP:
+        if not os.path.isdir(Path(home) / name):
+            continue
+        if os.path.islink(Path(home) / name):
+            left.append((name, "It's a shortcut to another place."))
+            continue
+        try:
+            folder = check_source(Path(home) / name, tool)
+        except Refused as e:
+            left.append((name, str(e)))
+            continue
+        try:
+            os.scandir(folder).close()  # macOS may refuse to list a folder, such as Documents, without permission
+        except OSError:
+            left.append((name, "This Mac didn't allow reading it."))
+            continue
+        if os.lstat(folder).st_dev != os.lstat(dest).st_dev:
+            left.append((name, "It's on a different drive from where the files go."))
+        else:
+            found.append(folder)
+    return found, left
+
+
 def _is_bare(name):
     if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\0" in name:
         return False
@@ -176,54 +236,77 @@ def _check_category(folder, name, tool):
     return True
 
 
+def _yours(st):
+    """Owned by this Mac user and not writable by anyone else, so nobody else can forge run history."""
+    return st.st_uid == os.getuid() and not st.st_mode & 0o022
+
+
 def _runs_dir(folder, create=False):
     runs = folder / RUNS
     try:
-        if not stat.S_ISDIR(os.lstat(runs).st_mode):
+        st = os.lstat(runs)
+        if not stat.S_ISDIR(st.st_mode) or not _yours(st):
             raise Refused("The run history here is not a normal folder, so nothing was moved.")
     except FileNotFoundError:
         if not create:
             return None
-        os.mkdir(runs)
+        os.mkdir(runs, 0o755)
     return runs
 
 
 # Scanning
 
-def scan(folder, tool):
-    images, videos = set(tool.images), set(tool.videos)
+def _scan_one(folder, tool, src=0):
+    videos = set(tool.videos)
     found = []
     try:
         with os.scandir(folder) as entries:
             for e in entries:
-                ext = os.path.splitext(e.name)[1].lower()
-                if e.name.startswith(".") or ext not in images | videos or not e.is_file(follow_symlinks=False):
+                if e.name.startswith(".") or not tool.wants(e.name) or not e.is_file(follow_symlinks=False):
                     continue
                 st = e.stat(follow_symlinks=False)
-                found.append(Item(e.name, st.st_ino, st.st_size, st.st_mtime_ns, ext in videos))
+                if st.st_flags & (SF_DATALESS | stat.UF_HIDDEN):
+                    continue  # hidden by macOS (a folder's Icon file), or an iCloud file not on this Mac
+                found.append(Item(e.name, st.st_ino, st.st_size, st.st_mtime_ns,
+                                  os.path.splitext(e.name)[1].lower() in videos, src=src))
     except OSError as e:
         raise Refused("That folder can't be read.") from e
-    found.sort(key=lambda i: i.name)
+    return found
+
+
+def scan(folder, tool):
+    return scan_many([folder], tool)
+
+
+def scan_many(folders, tool):
+    """Top level of each folder only. Capped at LIMIT, in name order."""
+    found = [item for n, folder in enumerate(folders) for item in _scan_one(folder, tool, n)]
+    found.sort(key=lambda i: (i.name, i.src))
     return Scan(found[:LIMIT], max(0, len(found) - LIMIT))
 
 
-def find_duplicates(folder, items):
-    """{extra copy: the copy kept}. Exact matches only."""
+def _duplicates(entries):
+    """[(key, path, size)] -> {key of an extra copy: key of the copy kept}. Exact matches only."""
     by_size, keepers, extras = {}, {}, {}
-    for item in items:
-        by_size.setdefault(item.size, []).append(item.name)
-    for names in by_size.values():
-        for name in names if len(names) > 1 else ():
+    for key, path, size in entries:
+        by_size.setdefault(size, []).append((key, path))
+    for group in by_size.values():
+        for key, path in group if len(group) > 1 else ():
             try:
-                with open(folder / name, "rb") as f:
+                with open(path, "rb") as f:
                     digest = hashlib.file_digest(f, "sha256").digest()
             except OSError:
                 continue
             if digest in keepers:
-                extras[name] = keepers[digest]
+                extras[key] = keepers[digest]
             else:
-                keepers[digest] = name
+                keepers[digest] = key
     return extras
+
+
+def find_duplicates(folder, items):
+    """{extra copy: the copy kept}, by name."""
+    return _duplicates([(i.name, folder / i.name, i.size) for i in items])
 
 
 # Thumbnails
@@ -246,6 +329,21 @@ def clear_thumbs():
     if os.path.lexists(THUMBS):
         for path in _thumbs_dir().glob("*.jpg"):
             os.unlink(path)
+
+
+def clear_previews():
+    """File Sorter's previews, and any batch folder a stopped run left behind. Nothing outside its own folder."""
+    if os.path.lexists(PREVIEWS):
+        root = _private_dir(PREVIEWS)
+        for path in root.glob("*.png"):
+            os.unlink(path)
+        for work in root.glob("tmp*"):
+            if stat.S_ISDIR(os.lstat(work).st_mode):
+                shutil.rmtree(work, ignore_errors=True)  # a batch folder inside our own private folder
+
+
+def clear_temp(tool):
+    (clear_previews if tool.classify else clear_thumbs)()
 
 
 def _run(args):
@@ -280,9 +378,9 @@ def _thumb_if_unchanged(folder, index, item):
 
 
 def make_thumbs(folder, items, tick=None):
-    """({index: thumbnail}, [names that couldn't be previewed])."""
+    """({index: thumbnail}, [names that couldn't be previewed]). folder may be a list: each item's own folder."""
     def one(pair):
-        thumb = _thumb_if_unchanged(folder, *pair)
+        thumb = _thumb_if_unchanged(folder[pair[1].src] if isinstance(folder, list) else folder, *pair)
         if tick:
             tick()
         return thumb
@@ -295,6 +393,73 @@ def make_thumbs(folder, items, tick=None):
             made[i] = _thumb_if_unchanged(folder, i, items[i])
     return ({i: p for i, p in enumerate(made) if p},
             [item.name for item, p in zip(items, made) if not p])
+
+
+class _Batch:
+    """One qlmanage call: its private work folder and the pictures still to come, by file name."""
+    def __init__(self, folder, src, group, out, tick):
+        self.folder, self.out, self.tick, self.sizes = folder, out, tick or (lambda: None), {}
+        self.work = Path(tempfile.mkdtemp(dir=folder))
+        self.waiting = {f"{item.name}.png": n for n, item in group if _matches(src / item.name, vars(item))}
+        self.paths = [str(src / item.name) for _, item in group if f"{item.name}.png" in self.waiting]
+
+    def harvest(self, final):
+        """Take each finished picture, numbered. One whose size is still changing waits a round."""
+        for name, n in list(self.waiting.items()):
+            try:
+                st = os.lstat(self.work / name)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size and (final or self.sizes.get(name) == st.st_size):
+                os.rename(self.work / name, self.folder / f"{n}.png")
+                self.out[n] = self.folder / f"{n}.png"
+                del self.waiting[name]
+                self.tick()
+            self.sizes[name] = st.st_size
+
+    def watch(self, proc):
+        """qlmanage can stay open after its last picture, so stop watching once it has gone quiet."""
+        start = quiet = time.monotonic()
+        while self.waiting and proc.poll() is None and time.monotonic() - start < PREVIEW_TIMEOUT:
+            before = len(self.waiting)
+            self.harvest(False)
+            if len(self.waiting) < before or not self.sizes:
+                quiet = time.monotonic()
+            if time.monotonic() - quiet > PREVIEW_QUIET:
+                return
+            time.sleep(.1)
+
+    def run(self):
+        proc = None
+        try:
+            if self.paths:
+                proc = subprocess.Popen([QLMANAGE, "-t", "-s", str(PREVIEW_SIZE), "-o", str(self.work), *self.paths],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.watch(proc)
+        except OSError:
+            pass
+        finally:
+            if proc and proc.poll() is None:
+                proc.kill()
+            if proc:
+                proc.wait()
+        self.harvest(True)
+        for _ in self.waiting:
+            self.tick()
+        shutil.rmtree(self.work, ignore_errors=True)  # only what Quick Look wrote into this private folder
+
+
+def make_previews(sources, items, out, tick=None):
+    """File Sorter: Quick Look pictures of each file, made and kept on this Mac, numbered like the items.
+    Fills out as they arrive. A file Quick Look can't draw gets an icon on the page instead."""
+    folder = _private_dir(PREVIEWS)
+    batches = []
+    for s, src in enumerate(sources):
+        group = [(n, item) for n, item in enumerate(items) if item.src == s]
+        batches += [(src, group[k:k + PREVIEW_BATCH]) for k in range(0, len(group), PREVIEW_BATCH)]
+    with ThreadPoolExecutor(4) as pool:
+        list(pool.map(lambda b: _Batch(folder, *b, out, tick).run(), batches))
+    return out
 
 
 # Claude
@@ -432,16 +597,26 @@ def _free_name(directory, name, taken):
         candidate = f"{stem} ({n}){ext}"
 
 
-def _plan(folder, items, tool):
+def _from(folder, m):
+    """The folder a logged file came from: the destination itself unless the entry says otherwise."""
+    return Path(m["from"]) if "from" in m else folder
+
+
+def _plan(folder, items, tool, sources):
     moves, exists, taken = [], {}, {}
+    dev = os.lstat(folder).st_dev
     for item in items:
         entry = {"kind": "move", "name": item.name, "dir": item.category, "ino": item.ino,
                  "size": item.size, "mtime_ns": item.mtime_ns}
+        if sources[item.src] != folder:
+            entry["from"] = str(sources[item.src])
         if not _is_bare(item.name):
             raise Refused(f"Not a file in this folder: {item.name}")
+        if os.lstat(sources[item.src]).st_dev != dev:
+            raise Refused("The files and the folder they go to must be on the same drive, so nothing was moved.")
         if item.category not in exists:
             exists[item.category] = _check_category(folder, item.category, tool)
-        if not _matches(folder / item.name, entry):
+        if not _matches(_from(folder, entry) / item.name, entry):
             raise Refused(f"{item.name} changed after the scan, so nothing was moved. Scan again.")
         entry["dest"] = _free_name(folder / item.category, item.name, taken.setdefault(item.category, set()))
         entry["made"] = not exists[item.category]
@@ -473,10 +648,12 @@ def _write_log(folder, moves):
         os.close(dir_fd)
 
 
-def apply(folder, items, tool):
-    """Move items. Stops at the first failure, and Undo covers whatever moved."""
+def apply(folder, items, tool, sources=None):
+    """Move items from their scanned folders (default: folder itself) into category folders in folder.
+    Stops at the first failure, and Undo covers whatever moved."""
     folder = check_folder(folder)
-    moves = _plan(folder, items, tool)
+    sources = [check_source(s, tool) for s in sources] if sources else [folder]
+    moves = _plan(folder, items, tool, sources)
     if not moves:
         return ApplyResult(0, 0)
     _write_log(folder, moves)
@@ -485,9 +662,9 @@ def apply(folder, items, tool):
         try:
             if m["made"] and not _check_category(folder, m["dir"], tool):
                 os.mkdir(folder / m["dir"])
-            if not _check_category(folder, m["dir"], tool) or not _matches(folder / m["name"], m):
+            if not _check_category(folder, m["dir"], tool) or not _matches(_from(folder, m) / m["name"], m):
                 raise Refused("It changed during the move.")
-            rename_excl(folder / m["name"], folder / m["dir"] / m["dest"])
+            rename_excl(_from(folder, m) / m["name"], folder / m["dir"] / m["dest"])
         except (OSError, Refused) as e:
             return ApplyResult(moved, len(moves), m["name"], e.strerror if isinstance(e, OSError) else str(e))
         moved += 1
@@ -497,10 +674,17 @@ def apply(folder, items, tool):
 # Undo
 
 def _read_log(log):
-    if not stat.S_ISREG(os.lstat(log).st_mode):
+    # Open once without following a link, then check the file actually opened, so it can't be swapped in between.
+    try:
+        fd = os.open(log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a pipe posing as a log can't make Undo wait
+    except OSError as e:
+        raise Refused("The run history here looks wrong, so nothing was moved.") from e
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or not _yours(st):
+        os.close(fd)
         raise Refused("The run history here looks wrong, so nothing was moved.")
     moves, undone, damaged, tried = [], False, 0, 0
-    with open(log, "rb") as f:
+    with os.fdopen(fd, "rb") as f:
         for line in f:
             if not line.strip():
                 continue
@@ -528,6 +712,8 @@ def _newest_pending(folder, tool):
             moves, undone, damaged, tried = _read_log(log)
             for m in moves:
                 _check_entry(m, tool)
+            for src in {m["from"] for m in moves if "from" in m}:
+                _check_from(folder, src, tool)
         except (Refused, OSError):
             continue
         if moves and not undone:
@@ -541,14 +727,30 @@ def pending_undo(folder, tool):
 
 def _check_entry(m, tool):
     def is_media(name):
-        return (_is_bare(name) and not name.startswith(".")
-                and os.path.splitext(name)[1].lower() in (*tool.images, *tool.videos))
+        return _is_bare(name) and not name.startswith(".") and tool.wants(name)
 
     ok = (isinstance(m, dict) and m.get("kind") == "move" and is_media(m.get("name")) and is_media(m.get("dest"))
           and m.get("dir") in tool.folders and type(m.get("made", False)) is bool
-          and all(type(m.get(k)) is int for k in ("ino", "size", "mtime_ns")))
+          and all(type(m.get(k)) is int for k in ("ino", "size", "mtime_ns"))
+          and ("from" not in m or type(m["from"]) is str))
     if not ok:
         raise Refused("The run history here looks wrong, so nothing was moved.")
+
+
+def _check_from(folder, src, tool):
+    """A logged "from" folder must be spelled as a real, absolute path that passes the folder checks, on the same drive.
+    One that is missing now still counts: Undo then leaves its files where they are and lists them."""
+    bad = Refused("The run history here looks wrong, so nothing was moved.")
+    try:
+        if not os.path.isabs(src) or os.path.normpath(src) != src or "\0" in src:
+            raise bad
+        if not os.path.lexists(src):
+            return
+        real = check_folder(src)
+        if str(real) != src or os.lstat(real).st_dev != os.lstat(folder).st_dev:
+            raise bad
+    except (Refused, OSError, ValueError) as e:
+        raise bad from e
 
 
 def undo(folder, tool):
@@ -576,9 +778,9 @@ def undo(folder, tool):
 
 # App state and local server
 
-def choose_folder():
+def choose_folder(prompt="Choose a messy folder"):
     """The Mac folder window. None if cancelled."""
-    script = 'POSIX path of (choose folder with prompt "Choose a messy folder")'
+    script = f'POSIX path of (choose folder with prompt "{prompt}")'
     done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     return done.stdout.strip() if done.returncode == 0 else None
 
@@ -586,8 +788,11 @@ def choose_folder():
 class App:
     """One folder at a time. Everything the page can see is in view()."""
 
-    def __init__(self, tool, model="sonnet"):  # Haiku scored under the 80% bar on the sample set
+    def __init__(self, tool, model="sonnet", home=None):  # Haiku scored under the 80% bar on the sample set
         self.tool, self.model = tool, model
+        self.home = Path(home) if home else Path.home()  # tests point the whole-computer button at a fake home
+        self.dest_choice = None  # File Sorter: where the category folders go. None means the scanned folder.
+        self.film = False  # recording extras (countdown on open, F and G keys); on with --film
         self.token = secrets.token_urlsafe(32)
         self.busy = threading.Lock()  # one long action at a time
         self.reset("start")
@@ -597,15 +802,25 @@ class App:
         self.left_out, self.skipped, self.duplicates, self.results, self.previewed = 0, [], {}, {}, 0
         self.pending, self.moved, self.failed, self.reason = 0, 0, None, None
         self.restored, self.left, self.message = 0, [], None
+        self.mode, self.sources, self.dest, self.left_folders = None, [], None, []
+        if self.dest_choice:
+            try:
+                self.pending = pending_undo(self.dest_choice, self.tool)
+            except (Refused, OSError):
+                self.pending = 0
 
     def view(self):
-        return {"title": self.tool.title, "folders": list(self.tool.folders), "phase": self.phase,
+        return {"title": self.tool.title, "film": self.film, "folders": list(self.tool.folders), "phase": self.phase,
                 "folder": str(self.folder) if self.folder else None, "names": [i.name for i in self.items],
                 "videos": [n for n, i in enumerate(self.items) if i.is_video], "thumbs": list(self.thumbs),
                 "left_out": self.left_out, "skipped": self.skipped, "previewed": self.previewed, "duplicates": self.duplicates,
                 "results": dict(self.results), "pending_undo": self.pending, "moved": self.moved,
                 "failed": self.failed, "reason": self.reason, "restored": self.restored,
-                "left": [{"name": x.name, "reason": x.reason} for x in self.left], "message": self.message}
+                "left": [{"name": x.name, "reason": x.reason} for x in self.left], "message": self.message,
+                "mode": self.mode, "sources": [str(s) for s in self.sources], "from": [i.src for i in self.items],
+                "dest": str(self.dest) if self.dest else None,
+                "dest_choice": str(self.dest_choice) if self.dest_choice else None,
+                "left_folders": [{"name": n, "reason": r} for n, r in self.left_folders]}
 
     def background(self, job):
         """Runs job holding the busy lock, which the caller already took."""
@@ -619,7 +834,7 @@ class App:
         threading.Thread(target=run, daemon=True).start()
 
     def fail(self, error):
-        clear_thumbs()
+        clear_temp(self.tool)
         if isinstance(error, Refused):
             detail = str(error)
         elif isinstance(error, ClaudeSlow):
@@ -630,37 +845,82 @@ class App:
             detail = "Something went wrong."
         self.phase, self.message = "problem", f"{detail} No file was moved."
 
-    def scan(self, path):
-        if not isinstance(path, str) or not path:
-            raise Refused("Choose a folder first.")
-        folder = check_folder(path)
-        found = scan(folder, self.tool)
-        pending = pending_undo(folder, self.tool)
-        clear_thumbs()
+    def _gather(self, mode, sources, dest, left_folders=()):
+        """Read the folders, then make pictures: Quick Look previews (File Sorter) or thumbnails for Claude (Photo Sorter)."""
+        found = scan_many(sources, self.tool)
+        pending = pending_undo(dest, self.tool)
+        clear_temp(self.tool)
         self.reset("scanning")
-        self.folder, self.items, self.left_out, self.pending = folder, found.items, found.left_out, pending
-        by_name = {i.name: n for n, i in enumerate(found.items)}
+        self.mode, self.sources, self.dest, self.left_folders = mode, sources, dest, list(left_folders)
+        self.folder = sources[0] if mode == "folder" else None
+        self.items, self.left_out, self.pending = found.items, found.left_out, pending
 
         def job():
-            extras = find_duplicates(folder, found.items)
+            extras = _duplicates([(n, sources[i.src] / i.name, i.size) for n, i in enumerate(found.items)])
+            self.duplicates = {str(extra): keep for extra, keep in extras.items()}
+
             def tick():
                 self.previewed += 1
-
-            self.thumbs, self.skipped = make_thumbs(folder, found.items, tick)
-            if found.items and not self.thumbs:
-                raise Refused("None of these files could be previewed.")
-            self.duplicates = {str(by_name[extra]): by_name[keep] for extra, keep in extras.items()
-                               if by_name[extra] in self.thumbs}
+            if self.tool.classify:
+                make_previews(sources, found.items, self.thumbs, tick)
+            else:
+                self.thumbs, self.skipped = make_thumbs(sources, found.items, tick)
+                if found.items and not self.thumbs:
+                    raise Refused("None of these files could be previewed.")
+                self.duplicates = {k: v for k, v in self.duplicates.items() if int(k) in self.thumbs}
             self.phase = "scanned" if found.items else "empty"
         return job
 
+    def sweep(self, _path=None):
+        """The whole-computer button: the top of the SWEEP folders in the home folder."""
+        if not self.dest_choice:
+            raise Conflict("Choose where the tidy folders go first.")
+        dest = check_folder(self.dest_choice)
+        sources, left = sweep_folders(self.home, self.tool, dest)
+        if not sources:
+            raise Refused("None of your folders could be read.")
+        return self._gather("sweep", sources, dest, left)
+
+    def set_dest(self, path):
+        """Where the category folders go. An empty path means the scanned folder."""
+        if self.phase not in ("start", "scanned", "review", "empty", "applied", "undone", "problem", "stopped"):
+            raise Conflict("Still working on the last step.")
+        if path is not None and not isinstance(path, str):
+            raise Refused("Choose a folder first.")
+        if self.mode == "sweep" and self.phase in ("scanned", "review"):
+            raise Conflict("Start again to change where the files go.")
+        dest = check_folder(path) if path else None
+        if dest and self.mode == "folder" and os.lstat(dest).st_dev != os.lstat(self.sources[0]).st_dev:
+            raise Refused("Choose a folder on the same drive as the files.")
+        self.dest_choice = dest
+        if self.phase in ("scanned", "review") and self.mode == "folder":
+            self.dest = dest or self.sources[0]
+            self.pending = pending_undo(self.dest, self.tool)
+        elif self.phase in ("start", "problem", "empty", "undone"):
+            self.reset("start")
+
+    def scan(self, path):
+        if not isinstance(path, str) or not path:
+            raise Refused("Choose a folder first.")
+        folder = check_source(path, self.tool)
+        dest = check_folder(self.dest_choice) if self.dest_choice else folder
+        if os.lstat(dest).st_dev != os.lstat(folder).st_dev:
+            raise Refused("That folder is on a different drive from where the files go. Choose another destination.")
+        return self._gather("folder", [folder], dest)
+
     def restart(self, _path=None):
-        clear_thumbs()
+        clear_temp(self.tool)
         self.reset("start")
 
     def sort(self, _path=None):
         if self.phase != "scanned":
             raise Conflict("Scan a folder first.")
+        if self.tool.classify:  # a lookup by file type, on this Mac
+            extras = {int(k) for k in self.duplicates}
+            self.results = {str(n): DUPLICATES if n in extras else self.tool.category(i.name)
+                            for n, i in enumerate(self.items)}
+            self.phase = "review"
+            return None
 
         def job():
             extras = {int(k) for k in self.duplicates}
@@ -672,24 +932,32 @@ class App:
         self.phase = "sorting"
         return job
 
-    def apply(self, _path=None):
+    def apply(self, path=None):
         if self.phase != "review":
             raise Conflict("There is nothing to apply.")
+        if self.needs_confirm() and path != str(self.dest):
+            raise Conflict("Confirm where the files go first.")  # the page sends the destination it showed
         for key, category in self.results.items():
             self.items[int(key)].category = category
         chosen = [self.items[int(key)] for key in self.results]
-        result = apply(self.folder, chosen, self.tool)
-        clear_thumbs()
+        target = self.dest
+        result = apply(target, chosen, self.tool, self.sources)
+        clear_temp(self.tool)
         self.moved, self.failed, self.reason = result.moved, result.failed, result.reason
-        self.pending = pending_undo(self.folder, self.tool)
+        self.pending = pending_undo(target, self.tool)
         self.phase = "stopped" if result.failed else "applied"
 
+    def needs_confirm(self):
+        """File Sorter always; Photo Sorter whenever files leave the folder they were found in."""
+        return bool(self.tool.classify or self.mode == "sweep" or self.dest != self.sources[0])
+
     def undo(self, _path=None):
-        if self.folder is None:
+        target = self.dest or self.dest_choice
+        if target is None:
             raise Conflict("Choose a folder first.")
-        result = undo(self.folder, self.tool)
+        result = undo(target, self.tool)
         self.restored, self.left = result.restored, result.left
-        self.pending = pending_undo(self.folder, self.tool)
+        self.pending = pending_undo(target, self.tool)
         self.phase = "undone"
 
 
@@ -731,15 +999,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(route != "/"):
             return self.reply(403)
         if route == "/":
-            return self.reply(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+            return self.reply(200, (PAGE.parent / self.app.tool.page).read_bytes(), "text/html; charset=utf-8")
         if route == "/api/state":
             return self.send_json(self.app.view())
-        if route in ("/api/pick", "/api/scan", "/api/sort", "/api/apply", "/api/undo"):
+        if route in ("/api/pick", "/api/scan", "/api/sort", "/api/apply", "/api/undo", "/api/sweep", "/api/dest"):
             return self.reply(405)
         number = route.removeprefix("/api/thumb/")
         thumb = self.app.thumbs.get(int(number)) if number.isdecimal() and number.isascii() and len(number) < 7 else None
         if route.startswith("/api/thumb/") and thumb and thumb.exists():
-            return self.reply(200, thumb.read_bytes(), "image/jpeg")
+            return self.reply(200, thumb.read_bytes(), "image/png" if thumb.suffix == ".png" else "image/jpeg")
         self.reply(404)
 
     def do_POST(self):
@@ -758,9 +1026,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400)
         path = body.get("path") if isinstance(body, dict) else None
         if self.path == "/api/pick":
-            return self.send_json({"path": choose_folder()})
+            prompt = "Choose where the tidy folders go" if path == "dest" else "Choose a messy folder"
+            return self.send_json({"path": choose_folder(prompt)})
         action = {"/api/scan": App.scan, "/api/sort": App.sort,
-                  "/api/apply": App.apply, "/api/undo": App.undo, "/api/reset": App.restart}.get(self.path)
+                  "/api/apply": App.apply, "/api/undo": App.undo, "/api/reset": App.restart,
+                  "/api/sweep": App.sweep, "/api/dest": App.set_dest}.get(self.path)
         if not action:
             return self.reply(404)
         self.act(action, path)
@@ -790,11 +1060,13 @@ def start_server(app):
     return ThreadingHTTPServer(("127.0.0.1", 0), handler)
 
 
-def missing_setup():
-    """What this Mac still needs, in plain words. Empty when ready."""
+def missing_setup(tool=None):
+    """What this Mac still needs, in plain words. Empty when ready. A tool that sorts by type needs only Python."""
     needs = []
     if sys.version_info[:2] < (3, 11):
         needs.append("Python 3.11 or newer: brew install python")
+    if tool and tool.classify:
+        return "\n".join(needs)
     if not shutil.which(FFMPEG):
         needs.append("ffmpeg: brew install ffmpeg")
     if not shutil.which(CLAUDE):
@@ -802,12 +1074,13 @@ def missing_setup():
     return "\n".join(needs)
 
 
-def serve(tool):
+def serve(tool, home=None):
     """Run a tool until Ctrl-C or its Terminal window closes."""
-    if missing_setup():
-        sys.exit("Before this can run, this Mac needs:\n" + missing_setup())
-    clear_thumbs()
-    app = App(tool)
+    if missing_setup(tool):
+        sys.exit("Before this can run, this Mac needs:\n" + missing_setup(tool))
+    clear_temp(tool)
+    app = App(tool, home=home)
+    app.film = "--film" in sys.argv[1:]  # for recording the tool, not for everyday use
     server = start_server(app)
     url = f"http://127.0.0.1:{server.server_address[1]}/#{app.token}"
     for stop in (signal.SIGTERM, signal.SIGHUP):
@@ -819,17 +1092,17 @@ def serve(tool):
     except KeyboardInterrupt:
         pass
     finally:
-        clear_thumbs()
+        clear_temp(tool)
 
 def _put_back(folder, m, result):
-    src = folder / m["dir"] / m["dest"]
-    if _matches(folder / m["name"], m):
+    src, home = folder / m["dir"] / m["dest"], _from(folder, m) / m["name"]
+    if _matches(home, m):
         return  # Apply stopped before this one moved
     if not _matches(src, m):
         result.left.append(Left(m["name"], "It's missing or has changed."))
         return
     try:
-        rename_excl(src, folder / m["name"])
+        rename_excl(src, home)
         result.restored += 1
     except OSError as e:
         reason = "Its original spot is taken." if e.errno == errno.EEXIST else e.strerror
