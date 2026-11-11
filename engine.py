@@ -237,17 +237,48 @@ def check_source(path, tool):
     return real
 
 
+# Windows: OneDrive backup often moves Desktop, Documents and Pictures to home\OneDrive\..., so ask
+# Windows where each one really lives (SHGetKnownFolderPath) instead of assuming home\<name>.
+_KNOWN_FOLDERS = {"Desktop": "B4BFCC3A-DB2C-424C-B029-7FE99A87C641", "Downloads": "374DE290-123F-4565-9164-39C4925E467B",
+                  "Documents": "FDD39AD0-238F-46AF-ADB4-6C85480369C7", "Pictures": "33E28130-4E1E-4676-835A-98395C3BC3BB",
+                  "Videos": "18989B1D-99B5-455B-841C-AB7C74E4DDFC", "Music": "4BD8D571-6D19-48D3-BE97-422220080E43"}
+
+
+def _known_folder(name):
+    """Windows only: where this user's Desktop, Documents and so on really are, or None."""
+    guid = _KNOWN_FOLDERS.get(name)
+    if not guid:
+        return None
+    try:
+        import uuid
+        buf = (ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID(guid).bytes_le)
+        out = ctypes.c_wchar_p()
+        hr = ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(buf), 0, None, ctypes.byref(out))
+        try:
+            return Path(out.value) if hr == 0 and out.value else None
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(out)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def sweep_paths(home):
+    """[(folder name, path)] the whole-computer button reads. A test's fake home is always used as given."""
+    real_home = WINDOWS and os.path.normcase(os.path.abspath(home)) == os.path.normcase(os.path.abspath(Path.home()))
+    return [(name, (real_home and _known_folder(name)) or Path(home) / name) for name in SWEEP]
+
+
 def sweep_folders(home, tool, dest):
     """([folders to read], [(folder name, why it was left out)]) for the whole-computer button."""
     found, left = [], []
-    for name in SWEEP:
-        if not os.path.isdir(Path(home) / name):
+    for name, path in sweep_paths(home):
+        if not os.path.isdir(path):
             continue
-        if os.path.islink(Path(home) / name) or (WINDOWS and _is_reparse(os.lstat(Path(home) / name))):
+        if os.path.islink(path) or (WINDOWS and _is_reparse(os.lstat(path))):
             left.append((name, "It's a shortcut to another place."))
             continue
         try:
-            folder = check_source(Path(home) / name, tool)
+            folder = check_source(path, tool)
         except Refused as e:
             left.append((name, str(e)))
             continue

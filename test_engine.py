@@ -780,6 +780,26 @@ time.sleep(5)
         with mock.patch("engine.CLAUDE_TIMEOUT", 0.3), self.assertRaises(engine.ClaudeSlow):
             self.categories(self.thumbs(1))
 
+    def test_windows_sweep_follows_folders_onedrive_moved(self):
+        home = Path.home()
+        moved = {"Desktop": home / "OneDrive" / "Desktop", "Documents": home / "OneDrive" / "Documents"}
+        with mock.patch("engine.WINDOWS", True), mock.patch("engine._known_folder", lambda n: moved.get(n)):
+            got = dict(engine.sweep_paths(home))
+        self.assertEqual(got["Desktop"], moved["Desktop"])
+        self.assertEqual(got["Documents"], moved["Documents"])
+        self.assertEqual(got["Music"], home / "Music")  # no answer from Windows: the usual place
+
+    def test_a_fake_home_is_always_read_as_given(self):
+        with mock.patch("engine.WINDOWS", True), mock.patch("engine._known_folder", lambda n: Path("/elsewhere") / n):
+            got = dict(engine.sweep_paths(self.dir))
+        self.assertEqual(got["Desktop"], self.dir / "Desktop")
+
+    @unittest.skipUnless(sys.platform == "win32", "asks Windows itself")
+    def test_W14_windows_reports_a_real_desktop_folder(self):
+        desktop = engine._known_folder("Desktop")
+        self.assertIsNotNone(desktop)
+        self.assertTrue(desktop.is_absolute())
+
     def test_recording_extras_are_off_unless_asked_for(self):
         self.assertIs(engine.App(TOOL).view()["film"], False)
 

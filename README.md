@@ -99,7 +99,7 @@ Your browser opens the tool. Keep the Terminal or PowerShell window open while y
 Pick one of the two buttons:
 
 - **Pick a folder to tidy:** choose one messy folder. The tool uses every file directly inside it, however many there are. Files inside its subfolders are left alone.
-- **Find photos (or files) all over my computer:** it collects the loose files at the top of your **Desktop, Downloads, Documents, Pictures, Movies (Videos on Windows) and Music** folders. It never touches your Photos library, apps or system files. On Windows it skips OneDrive files that are only in the cloud.
+- **Find photos (or files) all over my computer:** it collects the loose files at the top of your **Desktop, Downloads, Documents, Pictures, Movies (Videos on Windows) and Music** folders. It never touches your Photos library, apps or system files. On Windows it finds Desktop, Documents and Pictures even when OneDrive backup has moved them, and skips OneDrive files that are only in the cloud.
 
 **Where sorted files go:** under **Sorted photos go to**, click **Choose…** to pick a destination folder. If you don't, they go into new folders inside the folder you picked.
 
