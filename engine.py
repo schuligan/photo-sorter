@@ -1,16 +1,17 @@
 """Shared engine: scan a folder, sort it, move files safely, undo.
 
-A tool supplies only a Tool definition. Standard library only. Mac only.
+A tool supplies only a Tool definition. Standard library only. Mac, and Windows where sys.platform is win32.
 Rules that must hold: never delete or overwrite a file, every move can be undone,
-Claude gets no tools, and only metadata-free thumbnails leave the Mac. test_engine.py checks them.
+Claude gets no tools, and only metadata-free thumbnails leave the computer. test_engine.py checks them.
 """
 import base64
 import ctypes
 import errno
-import fcntl
 import hashlib
 import json
+import ntpath
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -27,6 +28,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+WINDOWS = sys.platform == "win32"
+if not WINDOWS:
+    import fcntl
 
 LIMIT = 1500
 DUPLICATES = "Duplicates"
@@ -52,7 +57,12 @@ CLAUDE_TIMEOUT = 300  # Claude can take 30 s+ for one reply when busy; 25 images
 BATCH = 25
 BATCHES_AT_ONCE = 6
 # Claude sees only these, so an API key or redirect setting can't reach it.
-CLAUDE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
+# What the claude CLI needs on Windows to start and find its login. Still no API-key variables.
+_WINDOWS_ENV = ("USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "COMSPEC",
+                "HOMEDRIVE", "HOMEPATH")
+CLAUDE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG") + (_WINDOWS_ENV if WINDOWS else ())
+# Not in os on Windows; 0 means no flag. O_BINARY is 0 on a Mac.
+O_NOFOLLOW, O_NONBLOCK, O_BINARY = (getattr(os, f, 0) for f in ("O_NOFOLLOW", "O_NONBLOCK", "O_BINARY"))
 
 # Exactly these, not what is under them.
 _BARE_ROOTS = ("/", "/Users", "/Volumes", "/private", "/var")
@@ -64,10 +74,14 @@ _SYSTEM = ("/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/private/etc
 _PACKAGES = (".photoslibrary", ".photolibrary", ".aplibrary", ".migratedphotolibrary", ".lrdata", ".app", ".bundle", ".framework", ".plugin", ".kext",
              ".pkg", ".fcpbundle", ".imovielibrary", ".tvlibrary", ".musiclibrary")
 # The whole-computer sweep reads the top of these folders in the home folder, nothing else.
-SWEEP = ("Desktop", "Downloads", "Documents", "Pictures", "Movies", "Music")
+SWEEP = ("Desktop", "Downloads", "Documents", "Pictures", "Videos" if WINDOWS else "Movies", "Music")
 # Files a browser is still writing.
 _PARTIAL = (".crdownload", ".download", ".part", ".partial", ".opdownload")
 SF_DATALESS = 0x40000000  # an iCloud file whose contents aren't on this Mac, from <sys/stat.h>
+# Windows: hidden, offline, or a OneDrive cloud-only file (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS).
+WIN_SKIP = stat.FILE_ATTRIBUTE_HIDDEN | stat.FILE_ATTRIBUTE_OFFLINE | 0x400000
+# Windows image formats ffmpeg may read: still-image demuxers, and mov/mp4 for HEIC.
+WIN_IMAGE_FORMATS = "image2,png_pipe,jpeg_pipe,mjpeg,webp_pipe,tiff_pipe,gif,mov,mp4,m4a,3gp,3g2,mj2"
 
 
 class Refused(Exception):
@@ -158,6 +172,40 @@ def _same(a, b):
         return False
 
 
+def _is_reparse(st):
+    """A Windows link, junction or other reparse point. Always False on a Mac, which has no such attribute."""
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _check_no_reparse(path):
+    """OSError if path, or any folder above it, is a reparse point. A part that doesn't exist yet is skipped."""
+    p = Path(path)
+    for part in (p, *p.parents):
+        try:
+            st = os.lstat(part)
+        except FileNotFoundError:
+            continue
+        if _is_reparse(st):
+            raise OSError(errno.ELOOP, "It's a link or junction", str(part))
+
+
+def windows_refusal(path, env=None, home=None):
+    """Why Windows refuses this folder, or None. String checks only, case-insensitive, so they test on any computer."""
+    env = os.environ if env is None else env
+    norm = lambda x: ntpath.normcase(ntpath.normpath(x))  # noqa: E731
+    p, home = norm(path), norm(home or env.get("USERPROFILE", ""))
+    if ntpath.splitdrive(p)[1] in ("", "\\") or p in (home, norm("C:\\Users"), ntpath.dirname(home)):
+        return "That's a whole disk or your home folder. Choose a folder inside it."
+    if not re.fullmatch(r"[A-Za-z]:", ntpath.splitdrive(str(path))[0]):  # \\?\ and UNC paths dodge the system-folder names below
+        return "Network and special paths can't be sorted."
+    named = [env.get(k) for k in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData")]
+    system = {norm(x) for x in ("C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)", "C:\\ProgramData",
+                                home + "\\AppData", *named) if x}
+    if any(p == s or p.startswith(s.rstrip("\\") + "\\") for s in system):
+        return "System folders can't be sorted."
+    return None
+
+
 def check_folder(path):
     """The chosen folder, or Refused. Compares real folders, so /USERS can't pass as a new name."""
     if not str(path).strip():
@@ -175,6 +223,8 @@ def check_folder(path):
     chain = (real, *real.parents)
     if any(_same(c, p) for c in chain for p in (*_SYSTEM, home / "Library")):
         raise Refused("System folders can't be sorted.")
+    if WINDOWS and windows_refusal(real, home=home):
+        raise Refused(windows_refusal(real, home=home))
     if any(c.suffix.lower() in _PACKAGES for c in chain):
         raise Refused("App and library packages can't be sorted.")
     return real
@@ -194,7 +244,7 @@ def sweep_folders(home, tool, dest):
     for name in SWEEP:
         if not os.path.isdir(Path(home) / name):
             continue
-        if os.path.islink(Path(home) / name):
+        if os.path.islink(Path(home) / name) or (WINDOWS and _is_reparse(os.lstat(Path(home) / name))):
             left.append((name, "It's a shortcut to another place."))
             continue
         try:
@@ -217,6 +267,8 @@ def sweep_folders(home, tool, dest):
 def _is_bare(name):
     if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\0" in name:
         return False
+    if WINDOWS and ("\\" in name or ":" in name):
+        return False  # a Windows path separator, drive or data stream
     try:
         return bool(os.fsencode(name))
     except ValueError:
@@ -236,8 +288,41 @@ def _check_category(folder, name, tool):
     return True
 
 
-def _yours(st):
+def _owner_is_me(path):
+    """Windows: True only if path's owner SID is this user's (or this process's default owner). Any failure is False."""
+    try:
+        adv, k32 = ctypes.windll.advapi32, ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        owner, sd, token = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+        # SE_FILE_OBJECT = 1, OWNER_SECURITY_INFORMATION = 1
+        if adv.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(sd)) != 0:
+            return False
+        try:
+            if not adv.OpenProcessToken(ctypes.c_void_p(k32.GetCurrentProcess()), 0x0008, ctypes.byref(token)):
+                return False  # 0x0008 = TOKEN_QUERY
+            try:
+                for kind in (1, 4):  # TokenUser, then TokenOwner: an elevated admin's new files belong to Administrators
+                    size = ctypes.c_ulong()
+                    adv.GetTokenInformation(token, kind, None, 0, ctypes.byref(size))
+                    buf = ctypes.create_string_buffer(size.value)
+                    if not adv.GetTokenInformation(token, kind, buf, size, ctypes.byref(size)):
+                        return False
+                    sid = ctypes.c_void_p.from_buffer(buf)  # both structures start with the SID pointer
+                    if adv.EqualSid(owner, sid):
+                        return True
+                return False
+            finally:
+                k32.CloseHandle(token)
+        finally:
+            k32.LocalFree(sd)
+    except (AttributeError, OSError, ValueError, TypeError):
+        return False
+
+
+def _yours(st, path):
     """Owned by this Mac user and not writable by anyone else, so nobody else can forge run history."""
+    if WINDOWS:  # POSIX modes mean nothing on Windows: check the owner SID, fail closed
+        return not _is_reparse(st) and _owner_is_me(path)
     return st.st_uid == os.getuid() and not st.st_mode & 0o022
 
 
@@ -245,7 +330,7 @@ def _runs_dir(folder, create=False):
     runs = folder / RUNS
     try:
         st = os.lstat(runs)
-        if not stat.S_ISDIR(st.st_mode) or not _yours(st):
+        if not stat.S_ISDIR(st.st_mode) or not _yours(st, runs):
             raise Refused("The run history here is not a normal folder, so nothing was moved.")
     except FileNotFoundError:
         if not create:
@@ -263,6 +348,13 @@ def _scan_one(folder, tool, src=0):
         with os.scandir(folder) as entries:
             for e in entries:
                 if e.name.startswith(".") or not tool.wants(e.name) or not e.is_file(follow_symlinks=False):
+                    continue
+                if WINDOWS:  # DirEntry.stat() leaves st_ino and st_dev at 0 on Windows
+                    st = os.lstat(e.path)
+                    if st.st_file_attributes & WIN_SKIP:
+                        continue
+                    found.append(Item(e.name, st.st_ino, st.st_size, st.st_mtime_ns,
+                                      os.path.splitext(e.name)[1].lower() in videos, src=src))
                     continue
                 st = e.stat(follow_symlinks=False)
                 if st.st_flags & (SF_DATALESS | stat.UF_HIDDEN):
@@ -315,6 +407,10 @@ def _private_dir(path):
     """A folder only this user can touch, or Refused."""
     path.mkdir(mode=0o700, exist_ok=True)
     st = os.lstat(path)
+    if WINDOWS:  # POSIX owners and modes mean nothing here, and the temp folder is already per-user
+        if not stat.S_ISDIR(st.st_mode) or _is_reparse(st):
+            raise Refused("A temporary folder looks wrong, so the run stopped.")
+        return path
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
         raise Refused("A temporary folder looks wrong, so the run stopped.")
     return path
@@ -346,6 +442,19 @@ def clear_temp(tool):
     (clear_previews if tool.classify else clear_thumbs)()
 
 
+def _exe(name):
+    """Windows: the full path, so .exe and .cmd shims are found without a shell. A Mac uses the name as before.
+    A .cmd is allowed for claude only: its arguments are fixed and the data goes in on stdin. ffmpeg: see _ffmpeg_ok."""
+    return (shutil.which(name) or name) if WINDOWS else name
+
+
+def _ffmpeg_ok():
+    """ffmpeg gets file names as arguments, and Python runs a .cmd or .bat through cmd.exe unescaped, so a file named
+    a&calc&.jpg would run calc. On Windows only a real program counts."""
+    found = shutil.which(FFMPEG)
+    return bool(found) and not (WINDOWS and found.lower().endswith((".cmd", ".bat")))
+
+
 def _run(args):
     try:
         return subprocess.run(args, capture_output=True, timeout=THUMB_TIMEOUT).returncode == 0
@@ -355,13 +464,19 @@ def _run(args):
 
 def make_thumb(src, index, is_video):
     """A small metadata-free JPEG named by number, or None. sips keeps GPS, so ffmpeg always goes last."""
+    if WINDOWS and not _ffmpeg_ok():
+        return None
     folder = _thumbs_dir()
     out, raw = folder / f"{index}.jpg", folder / f"{index}-raw.jpg"
     limits = ["-nostdin", "-loglevel", "error", "-y", "-protocol_whitelist", "file", "-format_whitelist"]
     clean = ["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-q:v", "5", str(out)]
     if is_video:
         fit = f"scale={THUMB_SIZE}:{THUMB_SIZE}:force_original_aspect_ratio=decrease"
-        ok = _run([FFMPEG, *limits, "mov,mp4,m4a,3gp,3g2,mj2", "-i", str(src), "-frames:v", "1", "-vf", fit, *clean])
+        ok = _run([_exe(FFMPEG), *limits, "mov,mp4,m4a,3gp,3g2,mj2", "-i", str(src), "-frames:v", "1", "-vf", fit, *clean])
+    elif WINDOWS:  # no sips: ffmpeg reads the photo itself, with the same metadata stripping
+        fit = f"scale={THUMB_SIZE}:{THUMB_SIZE}:force_original_aspect_ratio=decrease"
+        ok = _run([_exe(FFMPEG), *limits, WIN_IMAGE_FORMATS, "-pattern_type", "none",  # a %d in a name is not a sequence
+                      "-i", str(src), "-frames:v", "1", "-vf", fit, *clean])
     else:
         ok = (_run([SIPS, "-s", "format", "jpeg", "-Z", str(THUMB_SIZE), str(src), "--out", str(raw)])
               and _run([FFMPEG, *limits, "image2,mjpeg,jpeg_pipe", "-i", str(raw), "-frames:v", "1", *clean]))
@@ -452,6 +567,8 @@ class _Batch:
 def make_previews(sources, items, out, tick=None):
     """File Sorter: Quick Look pictures of each file, made and kept on this Mac, numbered like the items.
     Fills out as they arrive. A file Quick Look can't draw gets an icon on the page instead."""
+    if WINDOWS:
+        return out  # no Quick Look on Windows: every file shows its type badge on the page
     folder = _private_dir(PREVIEWS)
     batches = []
     for s, src in enumerate(sources):
@@ -497,7 +614,7 @@ def _rows(stdout):
 def _ask(batch, tool, model):
     """One call. --bare must never be used here: it needs an API key, which would bill."""
     _private_dir(EMPTY)
-    args = [CLAUDE, "-p", "--safe-mode", "--setting-sources", "", "--tools", "", "--permission-mode", "dontAsk",
+    args = [_exe(CLAUDE), "-p", "--safe-mode", "--setting-sources", "", "--tools", "", "--permission-mode", "dontAsk",
             "--no-session-persistence", "--strict-mcp-config", "--input-format", "stream-json",
             "--output-format", "stream-json", "--verbose", "--json-schema", _schema(tool), "--model", model]
     env = {k: os.environ[k] for k in CLAUDE_ENV if k in os.environ}
@@ -559,12 +676,19 @@ def sort_all(thumbs, tool, model, on_batch=None):
 
 # Moving
 
-_libc = ctypes.CDLL(None, use_errno=True)
+_libc = None if WINDOWS else ctypes.CDLL(None, use_errno=True)
 
 
 def rename_excl(src, dst):
     """Move in one step. Refuses if dst exists or any part of either path is a link.
     A plain rename would overwrite silently. Paths must be real (check_folder gives real ones)."""
+    if WINDOWS:
+        # Accepted gap: the check and the move are two steps, unlike the Mac's single RENAME_NOFOLLOW_ANY call,
+        # so a link swapped in between them is not caught. os.rename never overwrites on Windows.
+        _check_no_reparse(src)
+        _check_no_reparse(dst)
+        os.rename(src, dst)
+        return
     if _libc.renamex_np(os.fsencode(src), os.fsencode(dst), ctypes.c_uint(RENAME_FLAGS)) != 0:
         code = ctypes.get_errno()
         raise OSError(code, os.strerror(code), str(dst))
@@ -572,6 +696,9 @@ def rename_excl(src, dst):
 
 def full_sync(fd):
     """fsync alone doesn't reach the drive on macOS."""
+    if WINDOWS:
+        os.fsync(fd)
+        return
     fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
 
 
@@ -631,7 +758,9 @@ def _write_log(folder, moves):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
         log = runs / f"{stamp}-{secrets.token_hex(4)}.jsonl"
         draft = log.with_suffix(".new")
-        fd = os.open(draft, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        if WINDOWS:
+            _check_no_reparse(draft)
+        fd = os.open(draft, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_BINARY, 0o600)
         with os.fdopen(fd, "w") as f:
             f.writelines(json.dumps(m) + "\n" for m in moves)
             f.flush()
@@ -639,6 +768,8 @@ def _write_log(folder, moves):
         rename_excl(draft, log)
     except OSError as e:
         raise Refused("This folder can't do a safe move, so nothing was moved.") from e
+    if WINDOWS:
+        return  # Windows can't open or sync a folder; the log file itself is already synced
     dir_fd = os.open(runs, os.O_RDONLY)
     try:
         full_sync(dir_fd)
@@ -676,11 +807,13 @@ def apply(folder, items, tool, sources=None):
 def _read_log(log):
     # Open once without following a link, then check the file actually opened, so it can't be swapped in between.
     try:
-        fd = os.open(log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a pipe posing as a log can't make Undo wait
+        if WINDOWS:  # accepted gap: check then open, two steps, unlike the Mac's single O_NOFOLLOW open
+            _check_no_reparse(log)
+        fd = os.open(log, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_BINARY)  # a pipe posing as a log can't make Undo wait
     except OSError as e:
         raise Refused("The run history here looks wrong, so nothing was moved.") from e
     st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or not _yours(st):
+    if not stat.S_ISREG(st.st_mode) or not _yours(st, log):
         os.close(fd)
         raise Refused("The run history here looks wrong, so nothing was moved.")
     moves, undone, damaged, tried = [], False, 0, 0
@@ -778,8 +911,18 @@ def undo(folder, tool):
 
 # App state and local server
 
+_PICK_PS = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = $env:ORGANIZER_PROMPT; "
+            "$top = New-Object System.Windows.Forms.Form -Property @{TopMost = $true}; "
+            "if ($d.ShowDialog($top) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) } else { exit 1 }")
+
+
 def choose_folder(prompt="Choose a messy folder"):
     """The Mac folder window. None if cancelled."""
+    if WINDOWS:  # the prompt goes in through the environment, never into the script text
+        done = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", _PICK_PS], capture_output=True,
+                              encoding="utf-8", env={**os.environ, "ORGANIZER_PROMPT": prompt})
+        return done.stdout.strip() or None if done.returncode == 0 else None
     script = f'POSIX path of (choose folder with prompt "{prompt}")'
     done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     return done.stdout.strip() if done.returncode == 0 else None
@@ -1064,11 +1207,11 @@ def missing_setup(tool=None):
     """What this Mac still needs, in plain words. Empty when ready. A tool that sorts by type needs only Python."""
     needs = []
     if sys.version_info[:2] < (3, 11):
-        needs.append("Python 3.11 or newer: brew install python")
+        needs.append("Python 3.11 or newer: " + ("winget install Python.Python.3.12" if WINDOWS else "brew install python"))
     if tool and tool.classify:
         return "\n".join(needs)
-    if not shutil.which(FFMPEG):
-        needs.append("ffmpeg: brew install ffmpeg")
+    if not _ffmpeg_ok():
+        needs.append("ffmpeg: " + ("winget install Gyan.FFmpeg" if WINDOWS else "brew install ffmpeg"))
     if not shutil.which(CLAUDE):
         needs.append("Claude Code, signed in on your plan: see claude.com/claude-code")
     return "\n".join(needs)
@@ -1077,13 +1220,13 @@ def missing_setup(tool=None):
 def serve(tool, home=None):
     """Run a tool until Ctrl-C or its Terminal window closes."""
     if missing_setup(tool):
-        sys.exit("Before this can run, this Mac needs:\n" + missing_setup(tool))
+        sys.exit(f"Before this can run, this {'computer' if WINDOWS else 'Mac'} needs:\n" + missing_setup(tool))
     clear_temp(tool)
     app = App(tool, home=home)
     app.film = "--film" in sys.argv[1:]  # for recording the tool, not for everyday use
     server = start_server(app)
     url = f"http://127.0.0.1:{server.server_address[1]}/#{app.token}"
-    for stop in (signal.SIGTERM, signal.SIGHUP):
+    for stop in (signal.SIGTERM, *([signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])):  # no SIGHUP on Windows
         signal.signal(stop, lambda *_: sys.exit(0))
     print(f"{tool.title} is running. If no window opened, go to:\n{url}\nPress Ctrl-C to stop.")
     webbrowser.open(url)
@@ -1111,7 +1254,9 @@ def _put_back(folder, m, result):
 
 def _mark(log, kind):
     try:
-        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)  # never write through a swapped-in link
+        if WINDOWS:
+            _check_no_reparse(log)
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND | O_NOFOLLOW | O_BINARY)  # never write through a swapped-in link
         with os.fdopen(fd, "ab") as f:
             f.write(json.dumps({"kind": kind}).encode() + b"\n")
             f.flush()

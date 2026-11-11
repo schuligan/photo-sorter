@@ -43,7 +43,7 @@ class Base(unittest.TestCase):
         out = {}
         for p in self.dir.rglob("*"):
             if p.is_file() and ".organizer-runs" not in p.parts:
-                out[str(p.relative_to(self.dir))] = hashlib.sha256(p.read_bytes()).hexdigest()
+                out[p.relative_to(self.dir).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
         return out
 
     def sorted_items(self, mapping):
@@ -80,9 +80,12 @@ class Scanning(Base):
         self.assertEqual(result.left_out, 1)
 
     def test_28_hostile_names_are_plain_files(self):
-        for n in ("-rf.jpg", "$(touch p).jpg", "a;b.jpg", "new\nline.jpg"):
+        names = ["-rf.jpg", "$(touch p).jpg", "a;b.jpg"]
+        if not sys.platform == "win32":  # Windows can't create a file name containing a line break
+            names.append("new\nline.jpg")
+        for n in names:
             self.put(n)
-        self.assertEqual(len(engine.scan(self.dir, TOOL).items), 4)
+        self.assertEqual(len(engine.scan(self.dir, TOOL).items), len(names))
         self.assertFalse((self.dir / "p").exists())
 
 
@@ -147,6 +150,7 @@ class FolderRefusal(Base):
         self.assert_refused("~nosuchuser/x")
         self.assert_refused("/tmp/a\0b")
 
+    @unittest.skipIf(sys.platform == "win32", "chmod 0 doesn't lock a folder on Windows, which uses ACLs")
     def test_an_unreadable_folder_is_a_plain_refusal(self):
         locked = self.dir / "locked"
         locked.mkdir()
@@ -156,6 +160,7 @@ class FolderRefusal(Base):
             engine.scan(locked, TOOL)
         self.assertNotIn(str(self.dir), str(caught.exception))
 
+    @unittest.skipIf(sys.platform == "win32", "chmod 0o500 doesn't stop new files in a Windows folder, which uses ACLs")
     def test_a_read_only_folder_is_a_plain_refusal_at_apply(self):
         self.put("a.jpg")
         items = engine.scan(self.dir, TOOL).items
@@ -501,6 +506,7 @@ class Undoing(Base):
         self.assertEqual(engine.undo(self.dir, TOOL).restored, 2)
         self.assertEqual(self.tree(), before)
 
+    @unittest.skipIf(sys.platform == "win32", "chmod 0 doesn't make a file unreadable on Windows")
     def test_a_log_that_cannot_be_read_does_not_block_the_real_run(self):
         before = self.run_apply()
         runs = self.dir / engine.RUNS
@@ -616,6 +622,7 @@ class Undoing(Base):
         self.assertEqual(result.restored, 1)
         self.assertEqual(sorted(self.tree()), ["Nature/b.jpg", "a.jpg"])
 
+    @unittest.skipIf(sys.platform == "win32", "Windows can't create file names containing a line break")
     def test_31_file_name_with_a_line_break_survives_the_log(self):
         name = "new\nline.jpg"
         self.put(name, b"x")
@@ -641,6 +648,7 @@ class Undoing(Base):
         with self.assertRaises(engine.Refused):
             engine.undo(self.dir, TOOL)
 
+    @unittest.skipIf(sys.platform == "win32", "Windows can't open or fsync a folder, so there is no second sync")
     def test_a_log_flush_is_forced_before_the_first_move(self):
         self.put("a.jpg")
         order = []
@@ -649,6 +657,16 @@ class Undoing(Base):
              mock.patch("engine.rename_excl", side_effect=lambda a, b: (order.append(Path(a).suffix), real_move(a, b))):
             engine.apply(self.dir, self.sorted_items({"a.jpg": "Food"}), TOOL)
         self.assertEqual(order, ["sync", ".new", "sync", ".jpg"])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only: the Mac also syncs the run-history folder")
+    def test_a_log_flush_is_forced_before_the_first_move_on_windows(self):
+        self.put("a.jpg")
+        order = []
+        real_sync, real_move = engine.full_sync, engine.rename_excl
+        with mock.patch("engine.full_sync", side_effect=lambda f: (order.append("sync"), real_sync(f))), \
+             mock.patch("engine.rename_excl", side_effect=lambda a, b: (order.append(Path(a).suffix), real_move(a, b))):
+            engine.apply(self.dir, self.sorted_items({"a.jpg": "Food"}), TOOL)
+        self.assertEqual(order, ["sync", ".new", ".jpg"])
 
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
@@ -675,6 +693,10 @@ class ClaudeBase(Base):
         script = self.dir / "fake-claude"
         script.write_text(FAKE_CLAUDE.format(notes=str(self.notes), body=body))
         script.chmod(0o755)
+        if sys.platform == "win32":  # Windows can't run a #! script: a .cmd shim, like npm's claude.cmd, runs it
+            shim = self.dir / "fake-claude.cmd"
+            shim.write_text(f'@"{sys.executable}" "{script}" %*\n')
+            script = shim
         patcher = mock.patch("engine.CLAUDE", str(script))
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -861,6 +883,21 @@ class Thumbs(Base):
         self.assertIn("-nostdin", args)
         self.assertEqual(args[args.index("-map_metadata") + 1], "-1")
 
+    def test_windows_cmd_ffmpeg_makes_no_thumbnail_and_exe_does(self):
+        for found, runs in (("C:\\x\\ffmpeg.cmd", False), ("C:\\x\\ffmpeg.exe", True)):
+            with mock.patch("shutil.which", return_value=found), mock.patch.object(engine, "WINDOWS", True), \
+                    mock.patch("engine._run", return_value=False) as run:
+                engine.make_thumb(self.dir / "a.jpg", 0, False)
+            self.assertEqual(run.called, runs, found)
+
+    def test_windows_image_thumbnail_turns_off_ffmpeg_sequences(self):
+        with mock.patch("shutil.which", return_value="C:\\x\\ffmpeg.exe"), mock.patch.object(engine, "WINDOWS", True), \
+                mock.patch("engine._run", return_value=False) as run:
+            engine.make_thumb(self.dir / "a%d.jpg", 0, False)
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index("-pattern_type") + 1], "none")
+        self.assertLess(args.index("-pattern_type"), args.index("-i"))
+
     def test_34_every_command_has_a_timeout(self):
         with mock.patch("subprocess.run") as run:
             run.return_value.returncode = 0
@@ -894,6 +931,7 @@ class Thumbs(Base):
         make.assert_not_called()
         self.assertEqual((made, skipped), ({}, ["a.jpg"]))
 
+    @unittest.skipIf(sys.platform == "win32", "Windows has no POSIX mode bits, so chmod 0o755 can't open the folder to others")
     def test_11_a_private_folder_with_open_permissions_is_refused(self):
         engine.THUMBS.mkdir(mode=0o755)
         engine.THUMBS.chmod(0o755)
@@ -932,6 +970,7 @@ class RealThumbs(Thumbs):
         subprocess.run([engine.FFMPEG, "-loglevel", "error", "-y", *source, str(self.dir / out)], check=True)
         return self.dir / out
 
+    @unittest.skipIf(sys.platform == "win32", "sips, the macOS image tool, isn't on Windows")
     def test_33_planted_gps_is_gone_from_the_thumbnail(self):
         src = self.ffmpeg("plain.jpg", "-f", "lavfi", "-i", "testsrc=s=600x400", "-frames:v", "1")
         planted = self.put("gps.jpg", exif_gps_jpeg(src.read_bytes()))
@@ -944,6 +983,7 @@ class RealThumbs(Thumbs):
         self.assertNotIn(b"Lavc", thumb.read_bytes())
         self.assertEqual(os.listdir(engine.THUMBS), ["0.jpg"])
 
+    @unittest.skipIf(sys.platform == "win32", "sips, the macOS image tool, isn't on Windows")
     def test_4_thumbnail_is_256_on_the_long_side(self):
         src = self.ffmpeg("big.jpg", "-f", "lavfi", "-i", "testsrc=s=800x400", "-frames:v", "1")
         thumb = engine.make_thumb(src, 0, False)
@@ -1248,6 +1288,7 @@ class Server(ServerBase):
     def test_a_sort_before_a_scan_is_refused(self):
         self.assertEqual(self.call("POST", "/api/sort", {})[0].status, 409)
 
+    @unittest.skipIf(sys.platform == "win32", "Windows can't create file names containing < or >")
     def test_18_and_20_state_carries_names_only_as_data(self):
         s = self.scanned("<img src=x onerror=alert(1)>.jpg")
         r, _ = self.call("GET", "/api/state")
@@ -1257,8 +1298,25 @@ class Server(ServerBase):
 
 class Startup(unittest.TestCase):
     def test_missing_programs_are_named_with_the_install_step(self):
-        with mock.patch("shutil.which", lambda name: None if name == "ffmpeg" else "/x"):
+        with mock.patch("shutil.which", lambda name: None if name == "ffmpeg" else "/x"), \
+                mock.patch.object(engine, "WINDOWS", False):
             self.assertIn("brew install ffmpeg", engine.missing_setup())
+
+    def test_windows_cmd_ffmpeg_is_reported_missing_and_exe_is_accepted(self):
+        for found, ok in (("C:\\x\\ffmpeg.CMD", False), ("C:\\x\\ffmpeg.bat", False), ("C:\\x\\ffmpeg.exe", True)):
+            with mock.patch("shutil.which", lambda name, found=found: found), mock.patch.object(engine, "WINDOWS", True):
+                self.assertEqual("ffmpeg" not in engine.missing_setup(), ok, found)
+
+    def test_windows_setup_steps_use_winget_and_say_this_computer(self):
+        with mock.patch("shutil.which", return_value=None), mock.patch("sys.version_info", (3, 9, 0)), \
+                mock.patch.object(engine, "WINDOWS", True):
+            needs = engine.missing_setup()
+            self.assertIn("winget install Python.Python.3.12", needs)
+            self.assertIn("winget install Gyan.FFmpeg", needs)
+            self.assertNotIn("brew", needs)
+            with self.assertRaises(SystemExit) as stop:
+                engine.serve(FILES)
+        self.assertTrue(str(stop.exception.code).startswith("Before this can run, this computer needs:\n"))
 
     def test_old_python_is_named(self):
         with mock.patch("sys.version_info", (3, 9, 0)), mock.patch("shutil.which", return_value="/x"):
@@ -1290,6 +1348,13 @@ import file_sorter  # noqa: E402
 
 FILES = file_sorter.TOOL
 REAL_MAKE_THUMBS = engine.make_thumbs  # kept before any test replaces it
+VIDEOS = "Videos" if sys.platform == "win32" else "Movies"  # the home folder for films on each system
+
+
+def other_drive_folder():
+    """A folder the checks allow, likely on another drive from the test folder: the Mac's own temporary folder,
+    or on Windows the home folder (C: on GitHub's runner, whose checkout is on D:), since AppData\\Local\\Temp is refused."""
+    return Path(tempfile.mkdtemp(dir=Path.home() if engine.WINDOWS else None, prefix="organizer-test-")).resolve()
 
 
 class FilesBase(Base):
@@ -1347,6 +1412,7 @@ class Files(FilesBase):
         names = [i.name for i in engine.scan(self.home / "Downloads", FILES).items]
         self.assertEqual(names, sorted(["a.pdf", "b.XLSX", "c.zip", "noext", "d.weird"]))
 
+    @unittest.skipIf(sys.platform == "win32", "Windows has no os.chflags or iCloud dataless flag")
     def test_F1_icloud_files_not_on_this_mac_are_skipped(self):
         self.at("Desktop/here.pdf")
         away = self.at("Desktop/away.pdf")
@@ -1375,7 +1441,7 @@ class Files(FilesBase):
         self.assertEqual(engine.missing_setup(FILES) if sys.version_info >= (3, 11) else "", "")
 
     def test_F4_sweep_reads_only_the_top_of_the_six_folders(self):
-        for rel in ("Desktop/a.pdf", "Downloads/b.zip", "Documents/c.docx", "Pictures/d.jpg", "Movies/e.mov", "Music/f.mp3",
+        for rel in ("Desktop/a.pdf", "Downloads/b.zip", "Documents/c.docx", "Pictures/d.jpg", f"{VIDEOS}/e.mov", "Music/f.mp3",
                     "Downloads/Old/deep.pdf", "Library/Preferences/x.pdf", "Applications/Fake.app/Contents/y.pdf",
                     "Pictures/Photos Library.photoslibrary/z.jpg", "Desktop/.secret.txt", "loose-in-home.pdf",
                     "Documents/project/.git/HEAD", "Documents/project/main.py"):
@@ -1409,7 +1475,7 @@ class Files(FilesBase):
         self.assertEqual(sorted(before), sorted(self.everything()))  # same contents, none lost
 
     def test_F7_another_drive_never_moves(self):
-        other = Path(tempfile.mkdtemp()).resolve()
+        other = other_drive_folder()
         self.addCleanup(shutil.rmtree, other, True)
         if os.lstat(other).st_dev == os.lstat(self.dir).st_dev:
             self.skipTest("needs two drives")
@@ -1480,10 +1546,10 @@ class Files(FilesBase):
         outside = self.dir / "outside"
         outside.mkdir()
         os.symlink(outside, self.dir / "sneaky")
-        other = Path(tempfile.mkdtemp()).resolve()  # the Mac's own disk: another drive from the test folder
+        other = other_drive_folder()
         self.addCleanup(shutil.rmtree, other, True)
         mock.patch("engine._SYSTEM", tuple(p for p in engine._SYSTEM if p != "/private/var/folders")).start()
-        bad_ones = ["Desktop", str(self.dir / "sneaky"), "/System/Library", str(Path.home() / "Library"), 7,
+        bad_ones = ["Desktop", str(self.dir / "sneaky"), "/System/Library", str(Path.home() / ("AppData" if engine.WINDOWS else "Library")), 7,
                     str(self.home / "Desktop") + "/../Desktop"]
         if os.lstat(other).st_dev != os.lstat(self.dir).st_dev:
             bad_ones.append(str(other))
@@ -1502,6 +1568,7 @@ class Files(FilesBase):
                     engine.undo(self.dest, FILES)
                 self.assertEqual(before, self.everything())
 
+    @unittest.skipIf(sys.platform == "win32", "chmod 0o666/0o777 can't open run history to others on Windows; there it is checked by owner SID")
     def test_F10_run_history_others_can_write_is_not_trusted(self):
         self.at("Desktop/a.pdf", b"A")
         self.swept().apply(str(self.dest))
@@ -1540,6 +1607,7 @@ class Files(FilesBase):
         self.assertTrue((self.home / "Desktop" / "a.pdf").exists())
         self.assertTrue((self.dest / "Audio" / "b.mp3").exists())
 
+    @unittest.skipIf(sys.platform == "win32", "Windows can't create the name Icon\\r (a carriage return) and has no os.chflags")
     def test_F1_files_macos_marks_hidden_are_never_read(self):
         self.at("Downloads/report.pdf")
         icon = self.at("Downloads/Icon\r")
@@ -1556,6 +1624,7 @@ class Files(FilesBase):
         self.assertIn("Pictures", [n for n, _ in app.left_folders])
         self.assertEqual([i.name for i in app.items], ["a.pdf"])
 
+    @unittest.skipIf(sys.platform == "win32", "chmod 0o311 can't make a folder unlistable on Windows")
     def test_F4_a_folder_this_mac_wont_list_is_left_out_and_the_rest_still_sorts(self):
         self.at("Desktop/a.pdf")
         self.at("Documents/b.pdf")
@@ -1566,6 +1635,7 @@ class Files(FilesBase):
         self.assertEqual([i.name for i in app.items], ["a.pdf"])
         self.assertIn("Documents", [n for n, _ in app.left_folders])
 
+    @unittest.skipIf(sys.platform == "win32", "Windows has no os.mkfifo")
     def test_F10_a_pipe_posing_as_run_history_cannot_hang_undo(self):
         runs = self.dest / engine.RUNS
         runs.mkdir(mode=0o755)
@@ -1584,6 +1654,18 @@ class Files(FilesBase):
 
 
 class FilesPreviews(Base):
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only: the Mac makes Quick Look previews")
+    def test_F3_windows_makes_no_previews_and_raises_nothing(self):
+        mock.patch("engine.PREVIEWS", self.dir / "previews").start()
+        self.addCleanup(mock.patch.stopall)
+        src = self.dir / "src"
+        src.mkdir()
+        (src / "notes.txt").write_text("notes")
+        items = engine.scan(src, FILES).items
+        self.assertEqual(engine.make_previews([src], items, {}), {})
+        self.assertFalse((self.dir / "previews").exists())
+
+    @unittest.skipIf(sys.platform == "win32", "no Quick Look on Windows by design: File Sorter shows type badges instead")
     def test_F3_quick_look_previews_stay_in_the_private_folder_numbered_not_named(self):
         mock.patch("engine.PREVIEWS", self.dir / "previews").start()
         self.addCleanup(mock.patch.stopall)
@@ -1626,7 +1708,7 @@ class PhotosSweep(FilesBase):
     def test_sweep_takes_only_loose_photos_and_videos_and_undo_puts_them_back(self):
         mock.patch("engine.make_thumbs", lambda folders, items, tick=None: ({n: Path("x.jpg") for n in range(len(items))}, [])).start()
         mock.patch("engine.sort_all", lambda thumbs, tool, model, on_batch=None: on_batch({i: "Food" for i in thumbs})).start()
-        for rel in ("Desktop/a.jpg", "Pictures/b.png", "Movies/c.mov", "Downloads/notes.txt", "Pictures/Old/d.jpg",
+        for rel in ("Desktop/a.jpg", "Pictures/b.png", f"{VIDEOS}/c.mov", "Downloads/notes.txt", "Pictures/Old/d.jpg",
                     "Pictures/Photos Library.photoslibrary/e.jpg", "Desktop/.f.jpg"):
             self.at(rel)
         before = self.everything()
@@ -1714,3 +1796,120 @@ class FilesServer(ServerBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsLogic(Base):
+    """Windows rules that are plain logic, so they also run on a Mac."""
+    HOME = "C:\\Users\\me"
+
+    def refusal(self, path, env=None):
+        return engine.windows_refusal(path, env={} if env is None else env, home=self.HOME)
+
+    def test_W1_drive_roots_users_and_home_are_refused(self):
+        for path in ("C:\\", "D:\\", "c:", "\\\\server\\share", "C:\\Users", "c:\\USERS\\", "C:\\Users\\me", "C:\\users\\ME"):
+            self.assertIn("whole disk", self.refusal(path) or "", path)
+
+    def test_W2_system_folders_and_everything_under_them_are_refused(self):
+        for path in ("C:\\Windows", "c:\\windows\\System32", "C:\\Program Files\\App", "C:\\PROGRAM FILES (X86)",
+                     "C:\\ProgramData\\x", "C:\\Users\\me\\AppData", "c:\\users\\me\\appdata\\Local\\Temp"):
+            self.assertIn("System folders", self.refusal(path) or "", path)
+        self.assertIn("System folders", self.refusal("E:\\Win\\Logs", {"SystemRoot": "E:\\Win"}) or "")
+
+    def test_W3_ordinary_folders_pass(self):
+        for path in ("C:\\Users\\me\\Pictures", "C:\\Users\\me\\Pictures\\Trip", "D:\\Photos", "C:\\Program Files Old",
+                     "C:\\Users\\me\\AppDataBackup"):
+            self.assertIsNone(self.refusal(path), path)
+
+    def test_W5_extended_and_network_paths_are_refused(self):
+        for path in ("\\\\?\\C:\\Program Files\\X", "\\\\localhost\\C$\\ProgramData\\X", "\\\\server\\share\\X"):
+            self.assertIn("Network and special", self.refusal(path) or "", path)
+        self.assertIsNone(self.refusal("C:\\Users\\me\\Pictures\\Mess"))
+
+    def test_W4_a_reparse_point_anywhere_in_the_path_is_refused(self):
+        bad = self.dir / "link"
+        real_lstat = os.lstat
+
+        def lstat(p):
+            if Path(p) == bad:
+                return mock.Mock(st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+            return real_lstat(p)
+        with mock.patch("engine.os.lstat", side_effect=lstat):
+            with self.assertRaises(OSError):
+                engine._check_no_reparse(bad / "Food" / "a.jpg")
+            engine._check_no_reparse(self.dir / "plain" / "a.jpg")
+
+    def test_W5_the_windows_move_checks_both_paths_before_moving(self):
+        self.put("a.jpg")
+        with mock.patch("engine.WINDOWS", True), \
+             mock.patch("engine._check_no_reparse", side_effect=OSError(errno.ELOOP, "link")) as check, \
+             mock.patch("engine.os.rename") as rename:
+            with self.assertRaises(OSError):
+                engine.rename_excl(self.dir / "a.jpg", self.dir / "b.jpg")
+        rename.assert_not_called()
+        check.assert_called_once()
+
+    def test_W6_claude_on_windows_gets_what_it_needs_to_start_and_no_api_key(self):
+        need = {"USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "COMSPEC",
+                "HOMEDRIVE", "HOMEPATH"}
+        self.assertEqual(set(engine._WINDOWS_ENV), need)
+        self.assertFalse([k for k in (*engine.CLAUDE_ENV, *engine._WINDOWS_ENV)
+                          if "KEY" in k or "TOKEN" in k or "ANTHROPIC" in k or "BASE_URL" in k])
+
+    def test_W7_pages_take_a_folder_name_from_windows_and_mac_paths(self):
+        for page in ("page.html", "file_page.html"):
+            self.assertIn('const lastPart = p => (p || "").replace(/[\\/\\\\]+$/, "").split(/[\\/\\\\]/).pop();',
+                          (HERE / page).read_text(), page)
+
+    def test_W8_windows_names_with_a_separator_drive_or_stream_are_not_bare(self):
+        with mock.patch("engine.WINDOWS", True):
+            for name in ("..\\x.jpg", "a\\b.jpg", "C:x.jpg", "a.jpg:stream"):
+                self.assertFalse(engine._is_bare(name), name)
+            self.assertTrue(engine._is_bare("a.jpg"))
+
+
+    def test_W11_run_history_is_yours_on_windows_only_when_the_owner_lookup_says_so(self):
+        st = os.lstat(self.dir)
+        with mock.patch("engine.WINDOWS", True):
+            with mock.patch("engine._owner_is_me", return_value=False):
+                self.assertFalse(engine._yours(st, self.dir))
+            with mock.patch("engine._owner_is_me", return_value=True):
+                self.assertTrue(engine._yours(st, self.dir))
+
+    def test_W12_a_failed_or_mismatched_owner_lookup_is_not_yours(self):
+        failed = mock.Mock()
+        failed.windll.advapi32.GetNamedSecurityInfoW.return_value = 5  # ERROR_ACCESS_DENIED
+        mismatch = mock.Mock()
+        mismatch.windll.advapi32.GetNamedSecurityInfoW.return_value = 0
+        mismatch.windll.advapi32.EqualSid.return_value = 0
+        broken = mock.Mock()
+        broken.windll = mock.PropertyMock(side_effect=AttributeError)
+        del broken.windll
+        for fake in (failed, mismatch, broken):
+            with mock.patch("engine.ctypes", fake):
+                self.assertIs(engine._owner_is_me(self.dir), False)
+
+
+@unittest.skipUnless(sys.platform == "win32", "the real Windows move runs on the Windows CI job")
+class WindowsMoves(Base):
+    def test_W13_a_folder_you_just_made_is_yours(self):
+        made = self.dir / "mine"
+        made.mkdir()
+        self.assertTrue(engine._owner_is_me(made))
+        self.assertTrue(engine._yours(os.lstat(made), made))
+
+    def test_W9_a_move_never_overwrites(self):
+        a, b = self.put("a.jpg"), self.put("b.jpg")
+        with self.assertRaises(FileExistsError):
+            engine.rename_excl(a, b)
+        self.assertEqual((a.read_bytes(), b.read_bytes()), (b"a.jpg", b"b.jpg"))
+
+    def test_W10_a_move_through_a_junction_is_refused(self):
+        (self.dir / "real").mkdir()
+        self.put("a.jpg")
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(self.dir / "jn"), str(self.dir / "real")],
+                              capture_output=True)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        with self.assertRaises(OSError):
+            engine.rename_excl(self.dir / "a.jpg", self.dir / "jn" / "a.jpg")
+        self.assertTrue((self.dir / "a.jpg").exists())
+        self.assertEqual(list((self.dir / "real").iterdir()), [])

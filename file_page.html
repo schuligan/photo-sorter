@@ -848,7 +848,7 @@ function clack() {
 
 // ---------- Words and buttons. Everything from the server goes in as text, never as markup. ----------
 const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
-const lastPart = p => (p || "").replace(/\/+$/, "").split("/").pop();
+const lastPart = p => (p || "").replace(/[\/\\]+$/, "").split(/[\/\\]/).pop();
 function headline(before, word, after) {
   const h = $("headline"), key = before + word + after;
   if (h.dataset.key === key) return;

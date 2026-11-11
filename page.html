@@ -696,7 +696,7 @@ function music(busy) {
 }
 
 // Words and buttons. Everything from the server goes in as text, never as markup.
-const lastPart = p => (p || "").replace(/\/+$/, "").split("/").pop();
+const lastPart = p => (p || "").replace(/[\/\\]+$/, "").split(/[\/\\]/).pop();
 function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
 function headline(before, word, after) {
   const h = $("headline"), key = before + word + after;
