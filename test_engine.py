@@ -1285,7 +1285,7 @@ class SecondTool(ServerBase):
         self.assertTrue((self.photos / "a.png").exists())
 
 
-# File Sorter. Numbers match docs/lane/file-sorter/spec.md.
+# File Sorter.
 import file_sorter  # noqa: E402
 
 FILES = file_sorter.TOOL
