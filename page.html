@@ -1,0 +1,904 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Organizer</title>
+<style>
+:root {
+  --ink: #1d2939; --muted: #74839a; --faint: #a9b6c6; --line: rgba(255,255,255,.85);
+  --glass: rgba(255,255,255,.58); --glass-hi: rgba(255,255,255,.78);
+  --rose: #1f6fd6; --plum: #21a3d6; --bad: #c0392b;
+  --shadow: 0 18px 40px -22px rgba(40,80,140,.45), 0 2px 6px -2px rgba(40,80,140,.12);
+  --serif: ui-serif, "New York", "Iowan Old Style", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  color: var(--ink); font: 15px/1.35 var(--sans); overflow: hidden; -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(1100px 700px at 8% -10%, #d3e9ff 0%, transparent 60%),
+    radial-gradient(900px 700px at 105% 10%, #dbe6ff 0%, transparent 55%),
+    radial-gradient(900px 600px at 50% 115%, #e4f2ff 0%, transparent 60%),
+    linear-gradient(160deg, #f4f9fe 0%, #eef5fd 55%, #f3f8fd 100%);
+}
+canvas#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; z-index: 5; }
+
+/* Layout */
+#app { position: relative; height: 100%; display: grid; gap: 18px; padding: 22px 28px 20px;
+  grid-template-columns: minmax(250px, 320px) 1fr minmax(250px, 320px);
+  grid-template-rows: auto auto 1fr auto;
+  grid-template-areas: "top top top" "stats stats stats" "left ball right" "bar bar bar"; }
+#top { grid-area: top; display: flex; align-items: center; gap: 14px; min-width: 0; }
+#stats { grid-area: stats; }
+#left { grid-area: left; } #right { grid-area: right; }
+#ball { grid-area: ball; position: relative; min-height: 0; }
+#bar { grid-area: bar; }
+
+/* Header */
+.avatar { width: 46px; height: 46px; border-radius: 50%; flex: none; display: grid; place-items: center; color: #fff; font: italic 600 22px var(--serif);
+  background: conic-gradient(from 200deg, #7cc0ff, #9fc3ff, #b9dcff, #7cc0ff); box-shadow: 0 6px 18px -6px rgba(31,111,214,.6), inset 0 0 0 3px rgba(255,255,255,.65); }
+.heading { min-width: 0; flex: 1; }
+.studio { font-size: 13px; color: var(--muted); font-weight: 600; letter-spacing: .01em; }
+.studio b { color: var(--ink); }
+h1 { margin: 0; font-size: clamp(26px, 3.2vw, 44px); line-height: 1.05; font-weight: 750; letter-spacing: -.025em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+h1 em { font-family: var(--serif); font-style: italic; font-weight: 500; letter-spacing: -.01em; padding: 0 .06em;
+  background: linear-gradient(90deg, var(--rose), var(--plum)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.tools { display: flex; align-items: center; gap: 10px; flex: none; }
+.status { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; font-size: 13px; color: var(--muted);
+  background: var(--glass); border: 1px solid var(--line); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); white-space: nowrap; }
+.status i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.status.live i { background: var(--rose); box-shadow: 0 0 0 0 rgba(31,111,214,.6); animation: ping 1.4s infinite; }
+@keyframes ping { 70% { box-shadow: 0 0 0 9px rgba(31,111,214,0); } 100% { box-shadow: 0 0 0 0 rgba(31,111,214,0); } }
+.ghost { font: inherit; font-size: 13px; font-weight: 600; color: var(--muted); padding: 8px 13px; border-radius: 999px; cursor: pointer;
+  background: transparent; border: 1px solid rgba(110,128,150,.28); display: inline-flex; gap: 6px; align-items: center; }
+.ghost:hover { color: var(--ink); background: var(--glass); }
+.ghost.icon { width: 36px; height: 36px; padding: 0; justify-content: center; font-size: 17px; }
+.ghost.icon[aria-pressed="false"] { opacity: .45; text-decoration: line-through; }
+
+/* Stats */
+#stats { display: grid; grid-template-columns: 1.25fr repeat(4, 1fr); border-radius: 26px; padding: 16px 8px;
+  background: var(--glass); border: 1px solid var(--line); box-shadow: var(--shadow); }
+.stat { padding: 2px 22px; border-left: 1px solid rgba(110,128,150,.16); min-width: 0; }
+.stat:first-child { border-left: 0; }
+.stat small { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.stat small i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .7; }
+.stat b { display: block; margin-top: 2px; font-size: clamp(28px, 3vw, 46px); font-weight: 750; letter-spacing: -.03em; font-variant-numeric: tabular-nums; line-height: 1.1; transition: transform .25s; }
+.stat b.bump { transform: translateY(-3px) scale(1.04); }
+.stat.total b { background: linear-gradient(90deg, var(--rose), #3fa9f0); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+/* Folder columns */
+.col { min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.col h2 { margin: 2px 6px 0; font: italic 500 22px/1 var(--serif); color: var(--ink); display: flex; align-items: center; gap: 8px; }
+.col h2::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--rose); }
+.cards { display: flex; flex-direction: column; gap: 9px; min-height: 0; flex: 1;
+  /* Short windows scroll the cards rather than hide them; the padding keeps card shadows visible. */
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 2px 8px 6px; margin: -2px -8px 0; }
+.card { position: relative; border-radius: 22px; padding: 10px 14px 10px; cursor: default; opacity: .62;
+  background: var(--glass); border: 1px solid var(--line); box-shadow: var(--shadow);
+  transition: opacity .4s, transform .25s cubic-bezier(.3,1.6,.5,1), box-shadow .3s, background .3s; }
+.card.has { opacity: 1; }
+.card.pulse { transform: scale(1.035); background: var(--glass-hi); box-shadow: 0 0 0 3px rgba(31,111,214,.18), var(--shadow); }
+.card.open { cursor: pointer; } .card.open:hover { background: var(--glass-hi); }
+.card .row { display: flex; align-items: center; gap: 8px; }
+.card svg { width: 17px; height: 17px; flex: none; color: var(--muted); }
+.card .name { flex: 1; min-width: 0; font-weight: 650; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .n { font-weight: 750; font-size: 20px; font-variant-numeric: tabular-nums; color: var(--rose); letter-spacing: -.02em; }
+.card.dup { border-style: dashed; border-color: rgba(31,111,214,.35); }
+.card.dup .name::after { content: " · never deleted"; font-weight: 500; color: var(--muted); font-size: 12px; }
+.tiles { display: flex; flex-wrap: nowrap; padding: 8px 0 0 2px; min-height: 42px; }
+.tile { width: 36px; height: 36px; margin: 0; flex: none; border-radius: 8px; object-fit: cover; background: #e6eef7;
+  border: 2.5px solid #fff; box-shadow: 0 4px 10px -4px rgba(30,60,110,.45); visibility: hidden; }
+.tile.in { visibility: visible; animation: pop .35s cubic-bezier(.3,1.7,.5,1); }
+@keyframes pop { from { transform: scale(.4) rotate(0deg); } }
+.slot { width: 36px; height: 36px; margin: 0 4px 0 0; border-radius: 8px; border: 2px dashed rgba(110,128,150,.22); }
+
+/* Ball */
+#ballInner { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+#caption { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center; font: italic 17px var(--serif); color: var(--muted); }
+#start { pointer-events: auto; display: flex; flex-direction: column; align-items: center; gap: 12px; z-index: 6; position: relative; text-align: center;
+  padding: 24px 26px 20px; border-radius: 30px; background: rgba(255,255,255,.66); border: 1px solid var(--line); box-shadow: var(--shadow);
+  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+#start strong { font: italic 500 26px/1.1 var(--serif); }
+#start p { margin: 0; color: var(--muted); max-width: 320px; }
+#typed { display: flex; gap: 6px; width: min(380px, 80vw); }
+#path { flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 9px 14px; border-radius: 999px; color: var(--ink);
+  border: 1px solid var(--line); background: var(--glass); backdrop-filter: blur(10px); outline: none; }
+#total { position: relative; z-index: 6; text-align: center; display: none; padding: 26px 40px; border-radius: 34px;
+  background: rgba(255,255,255,.72); border: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); animation: rise .7s cubic-bezier(.2,1.4,.4,1); }
+#total.on { display: block; }
+#total b { display: block; font: italic 500 clamp(64px, 9vw, 120px)/1 var(--serif); letter-spacing: -.03em;
+  background: linear-gradient(90deg, var(--rose), var(--plum)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+#count { position: relative; z-index: 6; display: none; font: italic 500 clamp(120px, 18vw, 220px)/1 var(--serif);
+  background: linear-gradient(90deg, var(--rose), var(--plum)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+#count.on { display: block; animation: tick 1s ease-out both; }
+@keyframes tick { 0% { transform: scale(.6); opacity: 0; } 20% { transform: scale(1.08); opacity: 1; } 80% { opacity: 1; } 100% { transform: scale(.95); opacity: 0; } }
+#total span { display: block; margin-top: 6px; font-size: 16px; font-weight: 650; color: var(--ink); }
+@keyframes rise { from { transform: translateY(14px) scale(.92); opacity: 0; } }
+
+/* Bottom bar */
+#bar { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; min-height: 54px; }
+#words { text-align: center; max-width: 640px; min-width: 0; }
+#say { margin: 0; font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
+#say.bad { color: var(--bad); }
+#note { margin: 2px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; white-space: pre-line; }
+#actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+button { font: inherit; font-weight: 650; cursor: pointer; }
+.btn { padding: 12px 22px; border-radius: 999px; border: 1px solid var(--line); background: var(--glass-hi); color: var(--ink);
+  box-shadow: var(--shadow); backdrop-filter: blur(10px); transition: transform .15s, box-shadow .15s; }
+.btn:hover { transform: translateY(-1px); }
+.btn.main { background: var(--ink); color: #fff; border-color: var(--ink); display: inline-flex; align-items: center; gap: 9px; font-size: 16px; padding: 13px 26px; }
+.btn.main::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #6ec3ff; box-shadow: 0 0 10px #6ec3ff; }
+.btn.small { padding: 9px 16px; font-size: 13px; box-shadow: none; }
+kbd { font: 600 11px var(--sans); padding: 3px 7px; border-radius: 6px; background: rgba(255,255,255,.16); color: rgba(255,255,255,.85); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--rose); outline-offset: 2px; }
+
+/* Peek */
+#peek { position: fixed; inset: 6vh 8vw; z-index: 20; border-radius: 28px; padding: 22px 24px; overflow: auto;
+  background: rgba(255,255,255,.86); border: 1px solid var(--line); box-shadow: 0 40px 80px -30px rgba(30,60,110,.5); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+#peek header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+#peek h3 { margin: 0; flex: 1; font: italic 500 30px var(--serif); }
+#peek .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 14px; }
+#peek figure { margin: 0; min-width: 0; }
+#peek img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #eef4fa; display: block; border-radius: 14px; border: 3px solid #fff; box-shadow: 0 8px 18px -10px rgba(30,60,110,.5); }
+#peek figcaption { color: var(--muted); font-size: 12px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#scrim { position: fixed; inset: 0; z-index: 19; background: rgba(20,45,80,.18); backdrop-filter: blur(3px); }
+
+[hidden] { display: none !important; }
+#hint { position: fixed; left: 0; right: 0; bottom: 18px; text-align: center; color: var(--muted); font-size: 14px; display: none; z-index: 8; pointer-events: none; }
+body.film #hint.on { display: block; }
+body.film #bar, body.film .tools .ghost { display: none; }
+body.film { cursor: none; }
+
+/* Tall windows (a vertical reel) and narrow screens */
+@media (max-aspect-ratio: 1/1), (max-width: 900px) {
+  #app { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto minmax(150px, 1fr) auto auto;
+    grid-template-areas: "top top" "stats stats" "ball ball" "left right" "bar bar"; padding: 16px 14px 14px; gap: 10px; }
+  #top { gap: 10px; }
+  .avatar { width: 38px; height: 38px; font-size: 16px; }
+  h1 { font-size: clamp(21px, 5.2vw, 32px); white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .tools .ghost.icon { width: 32px; height: 32px; }
+  .status { display: none; }
+  #stats { grid-template-columns: repeat(4, 1fr); row-gap: 8px; padding: 12px 6px; border-radius: 22px; }
+  .stat.total { grid-column: 1 / -1; border-left: 0; text-align: center; }
+  .stat.total small { justify-content: center; }
+  .stat.total b { font-size: clamp(34px, 9vw, 52px); }
+  .stat:nth-child(2) { border-left: 0; }
+  .stat { padding: 0 8px; }
+  .stat small { font-size: 9px; letter-spacing: .08em; gap: 4px; }
+  .stat b { font-size: clamp(22px, 5.5vw, 32px); }
+  .col h2 { font-size: 17px; }
+  .cards { gap: 6px; }
+  .card { padding: 7px 10px 6px; border-radius: 16px; }
+  .card .name { font-size: 12.5px; } .card .n { font-size: 16px; }
+  .card.dup .name::after { content: ""; }
+  .tiles { min-height: 28px; padding-top: 4px; }
+  .tile, .slot { width: 24px; height: 24px; border-width: 2px; border-radius: 6px; }
+  #say { font-size: 14px; } #note { font-size: 11.5px; }
+  .btn.main { font-size: 14px; padding: 10px 20px; } .btn { padding: 10px 18px; font-size: 14px; }
+  body.film #app { padding-bottom: 16vh; padding-right: 8vw; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<canvas id="stage" aria-hidden="true"></canvas>
+<div id="app">
+  <header id="top">
+    <div class="avatar" aria-hidden="true">P</div>
+    <div class="heading">
+      <div class="studio"><b id="title">Organizer</b> · AI sorting</div>
+      <h1 id="headline"></h1>
+    </div>
+    <div class="tools">
+      <span class="status" id="status"><i></i><span id="statusText">Ready</span></span>
+      <button class="ghost icon" id="soundBtn" type="button" aria-pressed="true" aria-label="Sound" title="Sound on (click to mute)">♪</button>
+    </div>
+  </header>
+
+  <section id="stats" aria-label="Counts">
+    <div class="stat total"><small>Total files</small><b id="sTotal">0</b></div>
+    <div class="stat"><small><i></i>Photos</small><b id="sPhotos">0</b></div>
+    <div class="stat"><small><i></i>Videos</small><b id="sVideos">0</b></div>
+    <div class="stat"><small>Folders created</small><b id="sFolders">0</b></div>
+    <div class="stat"><small>Duplicates found</small><b id="sDups">0</b></div>
+  </section>
+
+  <section class="col" id="left"><h2>Folders</h2><div class="cards" id="leftCards"></div></section>
+
+  <section id="ball" aria-label="Your files">
+    <div id="ballInner">
+      <div id="start">
+        <strong>Pick a folder to tidy</strong>
+        <button id="pick" class="btn main" type="button">Choose folder</button>
+        <form id="typed"><input id="path" placeholder="or paste a folder path" aria-label="Folder path" autocomplete="off" spellcheck="false"><button class="btn small" type="submit">Load</button></form>
+        <p>Nothing moves until you say so. One click puts it all back.</p>
+      </div>
+      <div id="total"><b id="totalN">0</b><span id="totalWords">files sorted</span></div>
+      <div id="count" aria-live="polite"></div>
+    </div>
+    <div id="caption"></div>
+  </section>
+
+  <section class="col" id="right"><h2>More folders</h2><div class="cards" id="rightCards"></div></section>
+
+  <footer id="bar">
+    <div id="words"><p id="say" role="status"></p><p id="note"></p></div>
+    <div id="actions">
+      <button id="sort" class="btn main" type="button" hidden>Sort <kbd>Space</kbd></button>
+      <button id="apply" class="btn main" type="button" hidden>Apply · move the files <kbd>Space</kbd></button>
+      <button id="undo" class="btn" type="button" hidden>Put everything back</button>
+      <button id="retry" class="btn main" type="button" hidden>Try again</button>
+      <button id="again" class="btn" type="button" hidden>Choose another folder</button>
+    </div>
+  </footer>
+</div>
+<div id="hint">Space: next step · G: gather again · Esc: leave</div>
+<div id="scrim" hidden></div>
+<section id="peek" hidden aria-label="Folder contents">
+  <header><h3 id="peekTitle"></h3><button id="closePeek" class="btn small" type="button">Close</button></header>
+  <div class="grid" id="peekGrid"></div>
+</section>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const canvas = $("stage"), ctx = canvas.getContext("2d");
+const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const FOLDER_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.7l2 2.2h7.3A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>';
+const MAX_TILES = 22;
+
+// The token arrives after the # so it never reaches a server log or a referrer.
+let token = location.hash.slice(1);
+try {
+  if (token) sessionStorage.setItem("token", token); else token = sessionStorage.getItem("token") || "";
+} catch {}
+history.replaceState(null, "", location.pathname);
+
+const headers = { "X-Token": token, "Content-Type": "application/json" };
+const post = (path, body = {}) => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+
+// World state
+let W = 0, H = 0, S = 1;
+let view = { phase: "start", names: [], folders: [], results: {}, videos: [], thumbs: [], duplicates: {} };
+let folders = [], sprites = new Map(), loaded = "", queue = [], seen = new Set(), flying = 0, lastLaunch = 0;
+let spin = 0, videoSet = new Set();
+const filming = () => document.body.classList.contains("film");
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+// Big folders draw at 1x: 1,000 small tiles look the same and the frame rate holds.
+const wantDpr = () => view.thumbs.length > 300 ? 1 : Math.min(devicePixelRatio || 1, 2);
+function resize() {
+  const dpr = wantDpr();
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr; S = dpr;
+}
+addEventListener("resize", resize);
+
+// The ball sits in the middle panel; its size follows the panel.
+function ballGeo() {
+  const r = $("ball").getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 - 10, R: Math.max(70, Math.min(r.width, r.height - 40) * 0.4) };
+}
+
+// Folder cards (all text goes in as text, never as markup)
+function setFolders(names) {
+  if (folders.map(f => f.name).join("\n") === names.join("\n")) return;
+  $("leftCards").textContent = ""; $("rightCards").textContent = "";
+  const split = Math.ceil((names.length) / 2);
+  folders = names.map((name, i) => {
+    const card = document.createElement("div"), row = document.createElement("div"), label = document.createElement("span"),
+      n = document.createElement("span"), tiles = document.createElement("div");
+    card.className = "card" + (name === "Duplicates" ? " dup" : "");
+    row.className = "row"; row.innerHTML = FOLDER_SVG;
+    label.className = "name"; label.textContent = name; label.title = name;
+    n.className = "n"; n.textContent = "0"; tiles.className = "tiles";
+    for (let k = 0; k < 4; k++) { const s = document.createElement("i"); s.className = "slot"; tiles.append(s); }
+    row.append(label, n); card.append(row, tiles);
+    (i < split ? $("leftCards") : $("rightCards")).append(card);
+    const f = { name, count: 0, shown: 0, card, n, tiles, members: [] };
+    card.addEventListener("click", () => peek(f));
+    return f;
+  });
+}
+
+function resetCards() {
+  folders.forEach(f => {
+    f.count = 0; f.shown = 0; f.members = []; f.n.textContent = "0"; f.card.classList.remove("has");
+    f.tiles.textContent = "";
+    for (let k = 0; k < 4; k++) { const s = document.createElement("i"); s.className = "slot"; f.tiles.append(s); }
+  });
+}
+
+// Reserve the next slot in a card so a flight knows where to land.
+function reserve(f, s) {
+  f.tiles.querySelectorAll(".slot").forEach(x => x.remove());
+  const shown = f.tiles.querySelectorAll("img.tile");
+  if (shown.length >= MAX_TILES) return shown[shown.length - 1];
+  const img = document.createElement("img");
+  img.className = "tile"; img.alt = ""; img.src = s.url;
+  img.style.transform = `rotate(${rnd(-9, 9).toFixed(1)}deg)`;
+  f.tiles.append(img);
+  stack(f);
+  return img;
+}
+
+// Keep a card's tiles on one row: they overlap more as the folder fills up.
+function stack(f) {
+  const imgs = f.tiles.querySelectorAll("img.tile");
+  if (!imgs.length) return;
+  const size = imgs[0].offsetWidth || 36, room = f.tiles.clientWidth - size - 8;
+  const step = Math.min(size * 0.86, room / Math.max(imgs.length - 1, 1));
+  imgs.forEach((img, i) => { img.style.marginLeft = i ? `${(step - size).toFixed(1)}px` : "0"; });
+}
+addEventListener("resize", () => folders.forEach(stack));
+
+// Thumbnails, baked once into a white-bordered tile with a soft shadow.
+const TILE = 112, PAD = 14;
+function bake(bmp, video) {
+  // Big folders bake smaller tiles: 1,000 full-size tiles would hold about 80 MB.
+  const q = view.thumbs.length > 300 ? 0.5 : 1;
+  const c = document.createElement("canvas"); c.width = c.height = Math.ceil((TILE + PAD * 2) * q);
+  const g = c.getContext("2d"); g.scale(q, q);
+  g.shadowColor = "rgba(30,60,110,.32)"; g.shadowBlur = 10; g.shadowOffsetY = 4;
+  g.fillStyle = "#fff"; g.beginPath(); g.roundRect(PAD, PAD, TILE, TILE, 12); g.fill();
+  g.shadowColor = "transparent";
+  g.save(); g.beginPath(); g.roundRect(PAD + 5, PAD + 5, TILE - 10, TILE - 10, 8); g.clip();
+  const k = Math.max((TILE - 10) / bmp.width, (TILE - 10) / bmp.height), w = bmp.width * k, h = bmp.height * k;
+  g.drawImage(bmp, PAD + TILE / 2 - w / 2, PAD + TILE / 2 - h / 2, w, h);
+  g.restore();
+  if (video) {
+    g.fillStyle = "rgba(10,20,40,.55)"; g.beginPath(); g.arc(PAD + TILE - 24, PAD + TILE - 24, 13, 0, 6.283); g.fill();
+    g.fillStyle = "#fff"; g.beginPath(); g.moveTo(PAD + TILE - 28, PAD + TILE - 31); g.lineTo(PAD + TILE - 17, PAD + TILE - 24); g.lineTo(PAD + TILE - 28, PAD + TILE - 17); g.fill();
+  }
+  return c;
+}
+
+// Placeholder tiles so an empty screen still looks alive.
+const PASTELS = ["#c9e2ff", "#d9e4ff", "#dff0ff", "#d4ecff", "#d6e8ff", "#e3ecff", "#eef6ff", "#dcf3f6"];
+const ghosts = Array.from({ length: 140 }, (_, i) => {
+  const c = document.createElement("canvas"); c.width = c.height = TILE + PAD * 2;
+  const g = c.getContext("2d");
+  g.shadowColor = "rgba(30,60,110,.18)"; g.shadowBlur = 10; g.shadowOffsetY = 4;
+  g.fillStyle = "#fff"; g.beginPath(); g.roundRect(PAD, PAD, TILE, TILE, 12); g.fill(); g.shadowColor = "transparent";
+  const gr = g.createLinearGradient(0, 0, TILE, TILE);
+  gr.addColorStop(0, PASTELS[i % 8]); gr.addColorStop(1, PASTELS[(i * 3 + 2) % 8]);
+  g.fillStyle = gr; g.beginPath(); g.roundRect(PAD + 5, PAD + 5, TILE - 10, TILE - 10, 8); g.fill();
+  return { tile: c, ...spherePoint(i, 140), rot: rnd(-0.5, 0.5), depth: Math.sqrt(rnd(0.35, 1)), wob: rnd(0, 6.283), alpha: 1 };
+});
+
+function spherePoint(i, n) {
+  const y = 1 - (i + 0.5) / n * 2, r = Math.sqrt(1 - y * y), a = i * 2.39996;
+  return { ux: Math.cos(a) * r, uy: y, uz: Math.sin(a) * r };
+}
+
+function addSprite(id, bmp, url) {
+  const order = view.thumbs.indexOf(id), n = Math.max(view.thumbs.length, 1);
+  sprites.set(id, { id, url, video: videoSet.has(id), tile: bake(bmp, videoSet.has(id)), ...spherePoint(order < 0 ? sprites.size : order, n),
+    rot: rnd(-0.55, 0.55), depth: Math.sqrt(rnd(0.3, 1)), wob: rnd(0, 6.283), state: "pile", born: performance.now(),
+    x: 0, y: 0, size: 0, alpha: 1, z: 0 });
+  // During or after a countdown, photos wait for zero and then fly in; otherwise only a fresh pick flies in.
+  if (introAt) gatherIn(sprites.get(id), 1100, Math.max(0, introAt - performance.now()));
+  else if (gatherOnLoad) gatherIn(sprites.get(id), 400);
+}
+
+// The opening shot: photos start scattered all over the screen and swirl into the ball.
+// Opening the page on a ready folder counts down 3, 2, 1 first (start recording, then open the
+// link), and so does F. Right after picking a folder here, the photos fly in as they load.
+let gatherOnLoad = false, introAt = 0, booted = false;
+function gatherIn(s, spread, wait = 0) {
+  if (calm) return;
+  const big = tileSize(ballGeo(), view.thumbs.length || 1) * rnd(1.6, 3);
+  s.g = { x: rnd(-0.15, 1.15) * W, y: rnd(-0.15, 1.15) * H, size: big, rot: rnd(-1.2, 1.2), t: -wait - rnd(0, spread), dur: rnd(1300, 2200) };
+  s.state = "gather"; s.x = s.g.x; s.y = s.g.y; s.size = 0;
+}
+function regather() {
+  whoosh();
+  for (const s of sprites.values()) if (s.state === "pile" || s.state === "gather") gatherIn(s, 1100);
+}
+
+async function loadThumbs(st) {
+  const key = st.folder + st.names.length;
+  if (loaded === key) return;
+  loaded = key;
+  const ids = [...st.thumbs];
+  const worker = async () => {
+    for (let id; (id = ids.shift()) !== undefined;) {
+      const r = await fetch(`/api/thumb/${id}`, { headers: { "X-Token": token } });
+      if (!r.ok || loaded !== key) continue;
+      const blob = await r.blob();
+      addSprite(id, await createImageBitmap(blob), URL.createObjectURL(blob));
+    }
+  };
+  await Promise.all([1, 2, 3, 4, 5, 6].map(worker));
+  gatherOnLoad = false;
+}
+
+// Where a tile sits on the turning ball right now.
+function place(p, ball, now, size) {
+  const A = spin, B = 0.38, breathe = calm ? 1 : 1 + 0.045 * Math.sin(now / 850 + p.wob);
+  const x1 = p.ux * Math.cos(A) + p.uz * Math.sin(A), z1 = -p.ux * Math.sin(A) + p.uz * Math.cos(A);
+  const y2 = p.uy * Math.cos(B) - z1 * Math.sin(B), z2 = p.uy * Math.sin(B) + z1 * Math.cos(B);
+  const r = ball.R * p.depth * breathe, persp = 1 / (1 - z2 * p.depth * 0.32);
+  return { x: ball.x + x1 * r * persp, y: ball.y + y2 * r * persp, z: z2 * p.depth,
+    size: size * persp * (0.78 + 0.22 * (z2 + 1) / 2), alpha: 0.55 + 0.45 * (z2 * p.depth + 1) / 2 };
+}
+
+const tileSize = (ball, n) => Math.max(20, Math.min(ball.R * 0.42, ball.R * Math.sqrt(4 * Math.PI / Math.max(n, 1)) * 1.05));
+
+// Flights
+function launch(s, to, then) {
+  const from = { x: s.x, y: s.y, size: s.size }, dx = to.x - from.x, dy = to.y - from.y;
+  const bow = rnd(0.18, 0.38) * (Math.random() < 0.5 ? -1 : 1);
+  s.fly = { from, to, ctrl: { x: from.x + dx / 2 - dy * bow, y: from.y + dy / 2 + dx * bow - 60 }, then, rot0: s.rot };
+  s.state = "fly"; s.t = 0; s.dur = rnd(650, 950); s.alpha = 1;
+  flying++;
+}
+
+function slotTarget(el) {
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, size: r.width * (TILE + PAD * 2) / TILE, rot: 0 };
+}
+
+function sendToFolder(s) {
+  const f = folders.find(x => x.name === s.category);
+  if (!f) return;
+  const el = reserve(f, s);
+  launch(s, slotTarget(el), () => landed(s, f, el));
+}
+
+function landed(s, f, el) {
+  s.state = "in"; flying--; s.el = el;
+  el.classList.add("in");
+  f.count++; f.members.push(s);
+  f.card.classList.add("has", "pulse");
+  setTimeout(() => f.card.classList.remove("pulse"), 220);
+  tick(f);
+}
+
+function launchNext(now) {
+  const gap = Math.max(26, Math.min(170, 7000 / Math.max(queue.length, 1)));
+  if (!queue.length || now - lastLaunch < gap) return;
+  lastLaunch = now;
+  const id = queue.shift(), s = sprites.get(id);
+  if (!s) return;
+  s.category = view.results[id];
+  const keeper = sprites.get(view.duplicates?.[id]);
+  if (calm) {
+    const f = folders.find(x => x.name === s.category);
+    if (!f) return;
+    const el = reserve(f, s); flying++; landed(s, f, el);
+  } else if (keeper && s.state === "pile" && keeper.state === "pile") {
+    // An extra copy flies into its match, flashes, then leaves for Duplicates.
+    launch(s, { x: keeper.x, y: keeper.y, size: keeper.size, rot: keeper.rot }, () => { keeper.flash = 1; flying--; sendToFolder(s); });
+    s.dur = 520;
+  } else sendToFolder(s);
+}
+
+function step(s, dt, now, ball, size) {
+  if (s.state === "pile") {
+    const p = place(s, ball, now, size), grow = Math.min(1, (now - s.born) / 450);
+    const pop = calm ? 1 : 1 + 0.25 * Math.sin(grow * Math.PI) * (1 - grow);
+    s.x = p.x; s.y = p.y; s.z = p.z; s.size = p.size * grow * pop; s.alpha = p.alpha;
+  } else if (s.state === "gather") {
+    const g = s.g; g.t += dt;
+    if (g.t < 0) { s.size = 0; return; }
+    const p = place(s, ball, now, size), t = Math.min(g.t / g.dur, 1);
+    const e = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2, u = 1 - e;
+    // Curve around the ball so the pile swirls in rather than flying straight.
+    const cx = ball.x + (g.y - ball.y) * 0.55, cy = ball.y - (g.x - ball.x) * 0.55;
+    s.x = u * u * g.x + 2 * u * e * cx + e * e * p.x;
+    s.y = u * u * g.y + 2 * u * e * cy + e * e * p.y;
+    s.size = g.size + (p.size - g.size) * e; s.z = p.z; s.alpha = Math.min(1, t * 4);
+    s.drawRot = g.rot + (s.rot - g.rot) * e;
+    if (t >= 1) { s.state = "pile"; s.born = now - 450; s.drawRot = undefined; }
+  } else if (s.state === "fly") {
+    s.t += dt / s.dur;
+    const t = Math.min(s.t, 1), e = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2, f = s.fly, u = 1 - e;
+    s.x = u * u * f.from.x + 2 * u * e * f.ctrl.x + e * e * f.to.x;
+    s.y = u * u * f.from.y + 2 * u * e * f.ctrl.y + e * e * f.to.y;
+    s.size = f.from.size + (f.to.size - f.from.size) * e;
+    s.rot = f.rot0 + ((f.to.rot ?? 0) - f.rot0) * e;
+    if (s.t >= 1) f.then();
+  }
+}
+
+function drawTile(t, x, y, size, rot, alpha) {
+  const k = size / TILE, c = Math.cos(rot) * k * S, sn = Math.sin(rot) * k * S;
+  ctx.setTransform(c, sn, -sn, c, S * x, S * y);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(t, -(TILE + PAD * 2) / 2, -(TILE + PAD * 2) / 2, TILE + PAD * 2, TILE + PAD * 2);
+}
+
+let lastFrame = performance.now();
+function frame(now) {
+  const dt = Math.min(now - lastFrame, 50); lastFrame = now;
+  if (wantDpr() !== S) resize();
+  const busy = view.phase === "sorting" || queue.length > 0 || flying > 0;
+  if (!calm) spin += dt / 1000 * (busy ? 0.75 : view.phase === "scanning" ? 0.5 : 0.22);
+  music(busy && view.phase !== "scanning");
+  launchNext(now);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const ball = ballGeo();
+  const showGhosts = !sprites.size;
+  if (showGhosts) {
+    const size = tileSize(ball, ghosts.length);
+    const list = ghosts.map(g => ({ g, p: place(g, ball, now, size) })).sort((a, b) => a.p.z - b.p.z);
+    for (const { g, p } of list) drawTile(g.tile, p.x, p.y, p.size, g.rot, p.alpha * (view.phase === "start" ? 0.85 : 0.5));
+  }
+  const size = tileSize(ball, view.thumbs.length || sprites.size);
+  const pile = [], air = [];
+  for (const s of sprites.values()) { step(s, dt, now, ball, size); if (s.state === "pile") pile.push(s); else if (s.state === "fly" || s.state === "gather") air.push(s); }
+  pile.sort((a, b) => a.z - b.z);
+  for (const s of pile) {
+    drawTile(s.tile, s.x, s.y, s.size, s.rot, s.alpha);
+    if (s.flash > 0) {
+      ctx.globalAlpha = s.flash; ctx.strokeStyle = "#3d9bff"; ctx.lineWidth = 8;
+      ctx.beginPath(); ctx.roundRect(-TILE / 2 - 2, -TILE / 2 - 2, TILE + 4, TILE + 4, 14); ctx.stroke();
+      s.flash = Math.max(0, s.flash - 0.035);
+    }
+  }
+  for (const s of air) if (s.size > 0) drawTile(s.tile, s.x, s.y, s.size, s.drawRot ?? s.rot, s.alpha);
+  ctx.globalAlpha = 1;
+  counters(dt);
+  ui();
+  requestAnimationFrame(frame);
+}
+
+// Rolling counters
+const shownStat = {};
+function roll(id, target, dt) {
+  const el = $(id), cur = shownStat[id] ?? 0;
+  const next = Math.abs(target - cur) < 0.5 ? target : cur + (target - cur) * Math.min(1, dt / 140);
+  shownStat[id] = next;
+  const txt = Math.round(next).toLocaleString();
+  if (el.textContent !== txt) {
+    el.textContent = txt;
+    if (!calm) { el.classList.add("bump"); clearTimeout(el.bumpT); el.bumpT = setTimeout(() => el.classList.remove("bump"), 140); }
+  }
+}
+function counters(dt) {
+  let photos = 0, videos = 0, dups = 0;
+  folders.forEach(f => f.members.forEach(s => { if (f.name === "Duplicates") dups++; else if (s.video) videos++; else photos++; }));
+  roll("sTotal", (view.names || []).length, dt);
+  roll("sPhotos", photos, dt); roll("sVideos", videos, dt);
+  roll("sFolders", folders.filter(f => f.count > 0).length, dt);
+  roll("sDups", dups, dt);
+  folders.forEach(f => {
+    f.shown += (f.count - f.shown) * Math.min(1, dt / 120);
+    const t = String(Math.round(f.shown));
+    if (f.n.textContent !== t) f.n.textContent = t;
+  });
+}
+
+// Sound: original sounds made in the browser. Nothing is sampled or copied, so there is no
+// music file, licence or copyright match to worry about. Each landing goes "ka-ching" like a coin
+// into a piggy bank, the gather plays a power-up run, and a cash-register flourish marks the end.
+// On by default; audio starts on the first key or click.
+let audio, master, retro, soundOn = true, lastTick = 0, chimed = false;
+// master: coins go straight through a limiter, so many at once stay loud without distorting.
+// retro: the 8-bit countdown and power-up go through a softening filter first.
+function ensureAudio() {
+  if (!soundOn) return null;
+  if (!audio) {
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+    const limit = audio.createDynamicsCompressor();
+    limit.threshold.value = -10; limit.knee.value = 6; limit.ratio.value = 12; limit.attack.value = 0.002; limit.release.value = 0.15;
+    master = audio.createGain(); master.gain.value = 0.9;
+    master.connect(limit).connect(audio.destination);
+    retro = audio.createBiquadFilter(); retro.type = "lowpass"; retro.frequency.value = 3800;
+    retro.connect(master);
+  }
+  if (audio.state !== "running") {
+    // Safari unlocks audio only when something plays inside the key press or click: play silence.
+    const s = audio.createBufferSource(); s.buffer = audio.createBuffer(1, 1, 22050); s.connect(audio.destination); s.start(0);
+    audio.resume().catch(() => {});
+  }
+  return audio;
+}
+for (const ev of ["pointerdown", "keydown", "touchend", "click"]) addEventListener(ev, ensureAudio, true);
+$("soundBtn").onclick = () => {
+  soundOn = !soundOn;
+  if (soundOn) ensureAudio();
+  $("soundBtn").setAttribute("aria-pressed", soundOn);
+  $("soundBtn").title = soundOn ? "Sound on (click to mute)" : "Sound off (click to turn on)";
+};
+// Sounds are scheduled even while the browser is still waking audio up, so the first coins aren't lost.
+const ready = () => { if (!soundOn || !audio) return false; if (audio.state !== "running") audio.resume().catch(() => {}); return audio.state !== "closed"; };
+const hz = n => 440 * Math.pow(2, (n - 69) / 12);  // MIDI note number to pitch
+
+// One short chip note: square for lead, triangle for bass.
+function chip(n, at, len, vol, type = "square") {
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.value = hz(n);
+  g.gain.setValueAtTime(vol, at);
+  g.gain.setValueAtTime(vol, at + len * 0.7);
+  g.gain.linearRampToValueAtTime(0.0001, at + len);
+  o.connect(g).connect(retro); o.start(at); o.stop(at + len + 0.02);
+}
+
+// Landing: a "ka-ching" coin clink, like a coin dropping into a piggy bank. Metal rings at
+// uneven overtones, so the partials below are not whole multiples. Each folder sits at its own
+// pitch and every coin varies slightly, so a stream of photos sounds like coins pouring in.
+const COIN_PITCH = [1, 1.06, 1.12, 1.19, 1.26, 1.33, 1.41, 1.5];
+function coin(at, base, vol) {
+  [[1, 1, 0.32], [2.76, 0.45, 0.2], [5.4, 0.22, 0.12], [8.93, 0.1, 0.07]].forEach(([mult, amp, len]) => {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = "sine"; o.frequency.value = base * mult;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(vol * amp, at + 0.003);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + len);
+    o.connect(g).connect(master); o.start(at); o.stop(at + len + 0.02);
+  });
+}
+function kaching(at, base, vol) {
+  coin(at, base * 0.62, vol * 0.5);   // "ka": a duller first knock
+  coin(at + 0.045, base, vol);        // "ching": the bright ring
+}
+function tick(folder) {
+  if (!ready()) return;
+  const now = performance.now();
+  if (now - lastTick < 70) return;  // a thousand landings would otherwise be a buzz
+  lastTick = now;
+  const base = 1900 * COIN_PITCH[folders.indexOf(folder) % COIN_PITCH.length] * (0.97 + Math.random() * 0.06);
+  kaching(audio.currentTime, base, 0.35);
+}
+
+// Gather: a rising power-up run.
+function whoosh() {
+  if (!ensureAudio() || audio.state !== "running") return;
+  const t0 = audio.currentTime;
+  for (let i = 0; i < 14; i++) chip(55 + i * 2, t0 + i * 0.045, 0.06, 0.035);
+}
+// Done: a cash-register finish, a quick cascade of coins and a bell.
+function chime() {
+  if (!ready()) return;
+  const t0 = audio.currentTime;
+  for (let i = 0; i < 7; i++) kaching(t0 + i * 0.07, 2100 * (0.9 + Math.random() * 0.25), 0.28);
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = "sine"; o.frequency.value = 2637;
+  g.gain.setValueAtTime(0.0001, t0 + 0.55); g.gain.exponentialRampToValueAtTime(0.25, t0 + 0.56);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.8);
+  o.connect(g).connect(master); o.start(t0 + 0.55); o.stop(t0 + 1.85);
+}
+// Called every frame: the finish plays once when the sorting settles.
+let wasBusy = false;
+function music(busy) {
+  if (busy) { wasBusy = true; chimed = false; }
+  else if (wasBusy && !chimed) { wasBusy = false; chimed = true; chime(); }
+}
+
+// Words and buttons. Everything from the server goes in as text, never as markup.
+function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+function headline(before, word, after) {
+  const h = $("headline"), key = before + word + after;
+  if (h.dataset.key === key) return;
+  h.dataset.key = key; h.textContent = "";
+  const em = document.createElement("em"); em.textContent = word;
+  h.append(before, em, after);
+}
+function setText(id, t) { if ($(id).textContent !== t) $(id).textContent = t; }
+
+function ui() {
+  const v = view, busyFlying = queue.length > 0 || flying > 0, phase = v.phase;
+  const show = { start: phase === "start", sort: false, apply: false, undo: false, again: false, retry: false };
+  const place = (v.folder || "").replace(/\/+$/, "").split("/").pop() || "messy";
+  let say = "", note = "", bad = false, status = "Ready", live = false, caption = "";
+  const total = (v.names || []).length;
+  headline("Sorting my ", place, " folder");
+  if (phase === "start") { headline("Sort a ", "messy", " folder"); caption = "your mess goes here"; }
+  if (phase === "scanning") { say = `Looking through ${place}: ${v.previewed} of ${total}...`; status = `Reading ${v.previewed} of ${total}`; live = true; caption = "gathering the mess"; }
+  if (phase === "empty") {
+    show.again = true;
+    if (v.pending_undo) { say = `Up to ${plural(v.pending_undo, "file")} sorted here earlier can go back.`; show.undo = true; }
+    else { say = "No photos or videos at the top of this folder."; note = "Subfolders aren't checked."; }
+  }
+  if (phase === "scanned") {
+    say = `${plural(total, "file")} found. Nothing has moved yet.`;
+    status = "Ready to sort"; caption = "a beautiful mess";
+    show.again = true;
+    const extra = [];
+    if (v.left_out) extra.push(`${v.left_out} left out by the ${total}-file limit.`);
+    if (v.skipped.length) extra.push(`${v.skipped.length} couldn't be previewed and will stay where they are.`);
+    extra.push("Small copies of these photos go to Anthropic through Claude to be sorted.");
+    note = extra.join(" ");
+    show.sort = true;
+    if (v.pending_undo) { show.undo = true; note += `\nA last run here can be put back: up to ${plural(v.pending_undo, "file")}.`; }
+  }
+  const done = seen.size - queue.length;
+  if (phase === "sorting" || (phase === "review" && busyFlying)) {
+    say = `Sorting ${done} of ${(v.thumbs || []).length}...`; status = "Sorting into folders..."; live = true; caption = "claude is sorting";
+  }
+  if (phase === "review" && !busyFlying) {
+    say = "Sorted. Nothing has moved yet."; note = "Tap a folder to look inside.";
+    status = "Sorted · not moved yet"; caption = "";
+    show.apply = show.again = true;
+  }
+  if (phase === "applied") {
+    headline("Sorted my ", place, " folder");
+    say = `Done. ${plural(v.moved, "file")} sorted.`; status = "Done";
+    const untouched = v.skipped.length + v.left_out;
+    note = `Now in folders inside ${place}.${untouched ? ` ${untouched} not touched.` : ""}`;
+    show.undo = show.again = true;
+  }
+  if (phase === "stopped") {
+    say = `Stopped after ${plural(v.moved, "file")}.`; bad = true; status = "Stopped";
+    note = `${v.failed} couldn't be moved: ${v.reason}`; show.undo = show.again = true;
+  }
+  if (phase === "undone") {
+    headline("Back to the ", "mess", "");
+    say = `${plural(v.restored, "file")} back where they were.`; status = "Put back"; caption = busyFlying ? "" : "exactly as it was";
+    note = v.left.map(x => `${x.name}: ${x.reason}`).join("\n"); show.again = true;
+    show.undo = v.pending_undo > 0;
+  }
+  if (phase === "problem") { say = v.message; bad = true; show.again = true; show.retry = !!v.folder; status = "Problem"; }
+  if (startError) { say = startError; bad = true; }
+  $("start").hidden = !show.start;
+  for (const key of ["sort", "apply", "undo", "again", "retry"]) $(key).hidden = !show[key];
+  if (phase === "problem" && filming()) film(false);
+  const finished = phase === "applied", reviewed = phase === "review" && !busyFlying;
+  const used = folders.filter(f => f.count > 0).length, sorted = folders.reduce((n, f) => n + f.count, 0);
+  $("total").classList.toggle("on", finished || reviewed);
+  setText("totalN", finished ? v.moved.toLocaleString() : reviewed ? sorted.toLocaleString() : "");
+  setText("totalWords", finished ? (v.moved === 1 ? "file moved into folders" : "files moved into folders")
+    : reviewed ? `sorted into ${plural(used, "folder")} · nothing moved yet` : "");
+  setText("say", say); setText("note", note); setText("statusText", status); setText("caption", caption);
+  $("status").classList.toggle("live", live);
+  $("say").classList.toggle("bad", bad);
+  const open = (phase === "review" || phase === "applied") && !busyFlying;
+  folders.forEach(f => f.card.classList.toggle("open", open && f.count > 0));
+}
+
+// Talking to the engine
+let startError = "", misses = 0;
+function reconcile(st) {
+  const fresh = st.phase === "scanning" || st.phase === "start" || st.folder !== view.folder;
+  if (fresh && (view.phase !== st.phase || st.folder !== view.folder)) clearStage();
+  view = st;
+  videoSet = new Set(st.videos || []);
+  $("title").textContent = st.title;
+  if (document.title !== st.title) document.title = st.title;
+  setFolders(st.folders);
+  if (["scanned", "sorting", "review"].includes(st.phase)) loadThumbs(st);
+  if (!booted) { booted = true; if (st.phase === "scanned") countdown(true); }  // opened on a ready folder
+  const ids = Object.keys(st.results).map(Number).sort((a, b) =>
+    (st.duplicates[b] !== undefined) - (st.duplicates[a] !== undefined));
+  for (const id of ids) if (!seen.has(id) && sprites.has(id)) { seen.add(id); queue.push(id); }
+  if (st.phase === "undone" && !returned) { returned = true; flyHome(); }
+}
+
+let returned = false;
+function flyHome() {
+  const ball = ballGeo(), now = performance.now(), size = tileSize(ball, sprites.size);
+  for (const s of sprites.values()) {
+    if (s.state !== "in" || !s.el) continue;
+    const from = slotTarget(s.el);
+    s.x = from.x; s.y = from.y; s.size = from.size; s.rot = 0;
+    s.el.remove(); s.el = null;
+    if (calm) { s.state = "pile"; continue; }
+    const to = place(s, ball, now + 900, size);
+    launch(s, { ...to, rot: rnd(-0.5, 0.5) }, () => { s.state = "pile"; s.born = performance.now() - 450; flying--; });
+    s.dur = rnd(800, 1200);
+  }
+  resetCards();
+}
+
+function clearStage() {
+  introAt = 0;
+  for (const s of sprites.values()) URL.revokeObjectURL(s.url);
+  sprites.clear(); queue = []; seen = new Set(); flying = 0; loaded = ""; returned = false;
+  resetCards();
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { headers: { "X-Token": token } });
+    misses = 0;
+    if (r.ok) reconcile(await r.json());
+    else if (r.status === 403) startError = "Open this page from the link the app printed.";
+  } catch {
+    if (++misses > 8) startError = "The app has stopped. Start it again.";
+  }
+  setTimeout(poll, 250);
+}
+
+async function act(path, body) {
+  const r = await post(path, body);
+  if (!r.ok) {
+    const info = await r.json().catch(() => ({}));
+    startError = info.error || "That didn't work.";
+  } else startError = "";
+  return r.ok;
+}
+
+$("pick").onclick = async () => {
+  const r = await post("/api/pick");
+  const { path } = r.ok ? await r.json() : {};
+  if (path) { gatherOnLoad = true; act("/api/scan", { path }); }
+};
+// Leave the path box once a folder loads, so the next Space runs Sort instead of typing a space.
+$("typed").onsubmit = async e => { e.preventDefault(); const path = $("path").value.trim(); if (path) { gatherOnLoad = true; if (await act("/api/scan", { path })) $("path").blur(); } };
+$("sort").onclick = () => act("/api/sort");
+$("apply").onclick = () => act("/api/apply");
+$("undo").onclick = () => act("/api/undo");
+$("again").onclick = async () => { if (await act("/api/reset")) clearStage(); };
+$("retry").onclick = () => { clearStage(); gatherOnLoad = true; act("/api/scan", { path: view.folder }); };
+
+// A mouse click shouldn't leave a button focused, or the next Space would press it again.
+// Keyboard presses (detail 0) keep focus as normal.
+document.addEventListener("click", e => { if (e.detail > 0) e.target.closest?.("button")?.blur(); });
+
+// Film mode
+let hintTimer;
+// Film mode, for recording: full screen, no buttons. When a folder is ready it clears the ball,
+// counts 3, 2, 1 so the recording has a clean lead-in, then the photos fly in and wait for Space.
+let counting = false, countTimers = [];
+function showHint() {
+  $("hint").classList.add("on");
+  clearTimeout(hintTimer); hintTimer = setTimeout(() => $("hint").classList.remove("on"), 3000);
+}
+function countdown(on) {
+  countTimers.forEach(clearTimeout); countTimers = [];
+  counting = on; introAt = 0; $("count").classList.remove("on");
+  if (!on) return;
+  introAt = performance.now() + 3300;
+  if (!calm) for (const s of sprites.values()) if (s.state === "pile" || s.state === "gather") gatherIn(s, 1100, 3300);
+  [3, 2, 1].forEach((n, i) => countTimers.push(setTimeout(() => {
+    const c = $("count"); c.textContent = n; c.classList.remove("on"); void c.offsetWidth; c.classList.add("on");
+    if (ready()) chip(n === 1 ? 84 : 79, audio.currentTime, 0.09, 0.04);
+  }, 200 + i * 1000)));
+  countTimers.push(setTimeout(() => { $("count").classList.remove("on"); counting = false; whoosh(); showHint(); }, 3200));
+}
+function film(on) {
+  document.body.classList.toggle("film", on);
+  countdown(false);
+  if (on) {
+    document.documentElement.requestFullscreen?.().catch(() => {});
+    if (view.phase === "scanned" && sprites.size) countdown(true); else showHint();
+  } else {
+    $("hint").classList.remove("on");
+    if (document.fullscreenElement) document.exitFullscreen();
+  }
+}
+addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "f" || e.key === "F") film(!filming());
+  if (e.key === "Escape") { film(false); closePeek(); }
+  if ((e.key === "g" || e.key === "G") && view.phase === "scanned") regather();
+  // One key runs the next step, with or without film mode: Sort, then Apply.
+  // A focused control keeps Space for itself, so it can never be turned into Apply.
+  const el = document.activeElement;
+  if (el && el !== document.body && el.matches("button, input, textarea, select, a[href], [tabindex]")) return;
+  if (e.key === " " && !e.repeat && $("peek").hidden && !counting) {
+    e.preventDefault();
+    const next = ["sort", "apply"].find(k => !$(k).hidden);
+    if (next) $(next).click();
+  }
+});
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) film(false); });
+
+// Looking inside a folder
+function peek(f) {
+  if (!f.card.classList.contains("open")) return;
+  $("peekTitle").textContent = `${f.name} · ${f.count}`;
+  const grid = $("peekGrid"); grid.textContent = "";
+  for (const s of f.members) {
+    const fig = document.createElement("figure"), cap = document.createElement("figcaption"), img = document.createElement("img");
+    img.src = s.url; img.alt = "";
+    cap.textContent = cap.title = view.names[s.id] ?? "";
+    fig.append(img, cap); grid.append(fig);
+  }
+  $("peek").hidden = $("scrim").hidden = false;
+}
+function closePeek() { $("peek").hidden = $("scrim").hidden = true; }
+$("closePeek").onclick = closePeek;
+$("scrim").onclick = closePeek;
+
+resize();
+poll();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
